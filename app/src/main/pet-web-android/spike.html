@@ -1,0 +1,19 @@
+<!doctype html>
+<html style="background:transparent">
+  <body style="margin:0;background:transparent;overflow:hidden">
+    <video id="v" autoplay muted loop playsinline
+      src="/dsh-pet-7340/thumb/main/待机呼吸休闲.webm"
+      style="width:100vw;height:auto;touch-action:none"></video>
+    <script>
+      const v = document.getElementById('v');
+      let n = 0;
+      v.addEventListener('seeked', () => console.log('[spike] loop', ++n));
+      v.addEventListener('error', () => console.log('[spike] video error', v.error && v.error.code));
+      for (const t of ['pointerdown', 'pointermove']) {
+        window.addEventListener(t, (e) => {
+          console.log('[spike]', t, 'screenX=', e.screenX, 'raw=', AndroidPet.rawPointer());
+        });
+      }
+    </script>
+  </body>
+</html>

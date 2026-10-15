@@ -62,24 +62,27 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
-// 阶段 1 只需要验证页和一段透明 webm。产物在 gitignore 的 assets 目录里。
-tasks.register("syncSpikeAssets") {
+val syncPetAssets = tasks.register<Exec>("syncPetAssets") {
     group = "pet"
-    description = "拷贝 spike.html 和待机呼吸休闲.webm 到 assets"
-    val webm = rootProject.file("../dsh-pet/dsh-pet/assets/webm/待机呼吸休闲.webm")
-    val spike = file("src/main/pet-web-android/spike.html")
-    val webmOut = file("src/main/assets/pet/webm/待机呼吸休闲.webm")
-    val spikeOut = file("src/main/assets/pet-web/spike.html")
-    inputs.file(webm)
-    inputs.file(spike)
-    outputs.files(webmOut, spikeOut)
-    doLast {
-        if (!webm.isFile) error("找不到上游素材：${webm.absolutePath}")
-        webmOut.parentFile.mkdirs()
-        spikeOut.parentFile.mkdirs()
-        webmOut.parentFile.listFiles()?.filter { it.extension.equals("webm", true) }?.forEach { it.delete() }
-        webm.copyTo(webmOut, overwrite = true)
-        spike.copyTo(spikeOut, overwrite = true)
-    }
+    description = "构建 shared-core.js，并同步渲染壳、配置与素材"
+    workingDir = rootDir
+    commandLine("node", "tools/sync-pet-assets.mjs")
+    val upstream = rootProject.file("../dsh-pet/dsh-pet")
+    inputs.file(rootProject.file("tools/sync-pet-assets.mjs"))
+    inputs.dir(file("src/main/pet-web-android"))
+    inputs.file(upstream.resolve("assets/config.jsonc"))
+    inputs.dir(upstream.resolve("assets/webm"))
+    inputs.dir(upstream.resolve("assets/fonts"))
+    inputs.dir(upstream.resolve("assets/pic"))
+    inputs.file(upstream.resolve("scripts/build-desktop-core.mjs"))
+    inputs.dir(upstream.resolve("src/shared"))
+    inputs.files(
+        fileTree(upstream.resolve("runtime/electron-helper")) {
+            include("*.js", "*.html")
+            exclude("shared-core.js")
+        },
+    )
+    outputs.dir(file("src/main/assets/pet-web"))
+    outputs.dir(file("src/main/assets/pet"))
 }
-tasks.named("preBuild").configure { dependsOn("syncSpikeAssets") }
+tasks.named("preBuild").configure { dependsOn(syncPetAssets) }

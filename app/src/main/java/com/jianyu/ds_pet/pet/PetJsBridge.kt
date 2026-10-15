@@ -3,8 +3,8 @@ package com.jianyu.ds_pet.pet
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
+import org.json.JSONArray
 import org.json.JSONObject
-import kotlin.math.roundToInt
 
 class PetJsBridge(private val window: PetWindow) {
     private val main = Handler(Looper.getMainLooper())
@@ -15,10 +15,34 @@ class PetJsBridge(private val window: PetWindow) {
     @JavascriptInterface
     fun setBounds(json: String) {
         val o = JSONObject(json)
-        val x = o.getDouble("x").roundToInt()
-        val y = o.getDouble("y").roundToInt()
-        val width = o.getDouble("width").roundToInt()
-        val height = o.getDouble("height").roundToInt()
-        main.post { window.onBounds(x, y, width, height) }
+        main.post { window.onBounds(o) }
     }
+
+    @JavascriptInterface
+    fun reportFlight(json: String) {
+        val o = JSONObject(json)
+        main.post { window.onFlight(o) }
+    }
+
+    @JavascriptInterface
+    fun reportCollide(targetId: String, vx: Double, vy: Double) {
+        main.post { window.onCollide(targetId, vx, vy) }
+    }
+
+    @JavascriptInterface
+    fun showMenu(json: String) {
+        val items = JSONArray(json)
+        main.post { window.showMenu(items) }
+    }
+
+    @JavascriptInterface
+    fun reload() {
+        main.post { window.requestReload() }
+    }
+
+    @JavascriptInterface
+    fun loadPos(petId: String): String = window.settings.loadPos(petId)
+
+    @JavascriptInterface
+    fun savePos(petId: String, json: String) = window.savePosDebounced(petId, json)
 }

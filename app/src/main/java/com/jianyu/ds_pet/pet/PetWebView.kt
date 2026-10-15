@@ -27,6 +27,7 @@ class PetWebView(context: Context) : WebView(context) {
             allowFileAccess = false
             allowContentAccess = false
             setSupportZoom(false)
+            loadWithOverviewMode = false
             textZoom = 100
             useWideViewPort = false
         }

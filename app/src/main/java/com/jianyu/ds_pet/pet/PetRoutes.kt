@@ -1,13 +1,60 @@
 package com.jianyu.ds_pet.pet
 
 import android.content.Context
-import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
+
+internal data class ServedPet(
+    val id: String,
+    val name: String,
+    val sizeDp: Int,
+    val display: String,
+    val fixed: Boolean,
+    val corner: String,
+    val marginX: Int,
+    val marginY: Int,
+    val balanceEnabled: Boolean,
+    val whisperEnabled: Boolean,
+    val workStatusEnabled: Boolean,
+)
+
+internal fun servedPetConfigs(
+    templateName: String,
+    petCount: Int,
+    sizeDp: Int,
+    corner: String,
+    marginXDp: Int,
+    marginYDp: Int,
+    fixed: Boolean,
+): List<ServedPet> {
+    val count = petCount.coerceIn(1, 4)
+    val safeCorner = corner.takeIf { it in PET_CORNERS } ?: "bottom-right"
+    val size = sizeDp.coerceIn(160, 360)
+    val marginX = marginXDp.coerceAtLeast(0)
+    val marginY = marginYDp.coerceAtLeast(0)
+    val nameBase = templateName.ifBlank { "main" }
+    return List(count) { i ->
+        ServedPet(
+            id = if (i == 0) "main" else "main$i",
+            name = if (i == 0) nameBase else "$nameBase ${i + 1}",
+            sizeDp = size,
+            display = "desktop",
+            fixed = fixed,
+            corner = safeCorner,
+            marginX = marginX + i * size / 3,
+            marginY = marginY,
+            balanceEnabled = false,
+            whisperEnabled = false,
+            workStatusEnabled = false,
+        )
+    }
+}
+
+private val PET_CORNERS = setOf("top-left", "top-right", "bottom-left", "bottom-right")
 
 class PetRoutes(
     private val ctx: Context,
@@ -34,21 +81,30 @@ class PetRoutes(
     private fun configJson(): String {
         val base = JSONObject(ctx.assets.open("pet/config.json").bufferedReader().use { it.readText() })
         val template = base.getJSONArray("pets").getJSONObject(0)
+        val served = servedPetConfigs(
+            templateName = template.optString("name", "main"),
+            petCount = settings.petCount,
+            sizeDp = settings.sizeDp,
+            corner = settings.corner,
+            marginXDp = settings.marginXDp,
+            marginYDp = settings.marginYDp,
+            fixed = settings.fixed,
+        )
         val pets = JSONArray()
-        repeat(settings.petCount.coerceIn(1, 4)) { i ->
+        for (pet in served) {
             pets.put(JSONObject(template.toString()).apply {
-                put("id", if (i == 0) "main" else "main$i")
-                put("name", template.optString("name", "main") + if (i == 0) "" else " ${i + 1}")
-                put("size", settings.sizeDp)
-                put("display", "desktop")
-                put("balanceEnabled", false)
-                put("whisperEnabled", false)
-                put("workStatusEnabled", false)
-                put("fixedEnabled", settings.fixed)
+                put("id", pet.id)
+                put("name", pet.name)
+                put("size", pet.sizeDp)
+                put("display", pet.display)
+                put("balanceEnabled", pet.balanceEnabled)
+                put("whisperEnabled", pet.whisperEnabled)
+                put("workStatusEnabled", pet.workStatusEnabled)
+                put("fixedEnabled", pet.fixed)
                 put("position", JSONObject()
-                    .put("corner", settings.corner)
-                    .put("marginX", settings.marginXDp + i * settings.sizeDp / 3)
-                    .put("marginY", settings.marginYDp))
+                    .put("corner", pet.corner)
+                    .put("marginX", pet.marginX)
+                    .put("marginY", pet.marginY))
             })
         }
         base.put("pets", pets)
@@ -91,7 +147,6 @@ class PetRoutes(
         )
         if (range != null) headers["Content-Range"] = "bytes $start-$end/$total"
         val status = if (range != null) 206 else 200
-        Log.i(TAG, "$status $path bytes $start-$end/$total")
         return WebResourceResponse(
             mime, null,
             status,
@@ -107,7 +162,6 @@ class PetRoutes(
     private fun notFound() = WebResourceResponse("text/plain", "utf-8", 404, "Not Found", emptyMap(), "".byteInputStream())
 
     companion object {
-        private const val TAG = "PetSpike"
         const val ORIGIN = "https://appassets.androidplatform.net"
         const val PREFIX = "/dsh-pet-7340/"
 

@@ -20,6 +20,7 @@ class PetSettings(ctx: Context) {
     var marginYDp: Int
         get() = sp.getInt("marginYDp", 48)
         set(v) = sp.edit().putInt("marginYDp", v).apply()
+    /** 阶段 2 的固定头顶比例。阶段 3 起气泡按实际高度撑开，不再读取。 */
     var topMarginRatio: Float
         get() = sp.getFloat("topMarginRatio", 0.3f)
         set(v) = sp.edit().putFloat("topMarginRatio", v).apply()
@@ -29,6 +30,15 @@ class PetSettings(ctx: Context) {
     var petCollision: Boolean
         get() = sp.getBoolean("petCollision", false)
         set(v) = sp.edit().putBoolean("petCollision", v).apply()
+    /** 左右各裁掉 [COMPACT_SIDE_CROP] 倍宠物宽度的透明边。 */
+    var compact: Boolean
+        get() = sp.getBoolean("compact", false)
+        set(v) = sp.edit().putBoolean("compact", v).apply()
+
+    companion object {
+        /** 不超过身体左侧透明区（画布 200/640）。再大就会切到身体。 */
+        const val COMPACT_SIDE_CROP = 0.15
+    }
 
     fun loadPos(petId: String): String = sp.getString("pos.$petId", "null")!!
     fun savePos(petId: String, json: String) = sp.edit().putString("pos.$petId", json).apply()

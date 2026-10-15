@@ -74,7 +74,9 @@ const required = [
   [sprite, 'dispose()'],
   [sprite, 'this.customPos'], [sprite, 'this.pressScoreFired'], [sprite, 'this.dragState'],
   [sprite, 'this.margin'], [sprite, 'this.hit'], [sprite, 'this.videoA'],
-  [constants, 'let sprites'], [constants, 'function toScreen'],
+  [sprite, 'renderBubble()'], [sprite, 'relayout()'], [sprite, 'sendBounds(px, py)'],
+  [sprite, 'this.bubbleOn'], [sprite, 'this.whisperOn'], [sprite, 'this.workOn'],
+  [constants, 'let sprites'], [constants, 'function toScreen'], [constants, 'function applyDeskGeometry'],
 ];
 for (const [text, id] of required) {
   if (!text.includes(id)) throw new Error('上游标识缺失：' + id);

@@ -9,6 +9,7 @@ import android.view.Choreographer
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.Menu
+import android.view.View
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -47,6 +48,10 @@ class PetWindow(
     }
 
     private var pageReady = false
+    private var windowHidden = false
+    private var wantPaused = false
+    private var holding = false
+    private val pendingEmits = LinkedHashMap<String, String>()
     private var pendingBounds: IntArray? = null
     private val applyBounds = Choreographer.FrameCallback {
         val b = pendingBounds ?: return@FrameCallback
@@ -58,15 +63,28 @@ class PetWindow(
         if (webView.isAttachedToWindow) wm.updateViewLayout(webView, lp)
     }
 
-    fun attach(geo: DeskGeometry) {
+    fun attach(geo: DeskGeometry, startHidden: Boolean = false) {
         pageReady = false
+        pendingEmits.clear()
+        if (startHidden) {
+            windowHidden = true
+            webView.visibility = View.GONE
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        webView.setOnApplyWindowInsetsListener { _, insets ->
+            service.requestGeometryPush()
+            insets
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                 service.routes.handle(request) ?: service.assetLoader.shouldInterceptRequest(request.url)
 
             override fun onPageFinished(view: WebView, url: String) {
                 pageReady = true
-                if (PetOverlayService.isPaused) setPaused(true)
+                val queued = pendingEmits.toMap()
+                pendingEmits.clear()
+                queued.forEach { (name, payload) -> deliver(name, payload) }
+                if (wantPaused || windowHidden) applyHold()
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -94,6 +112,8 @@ class PetWindow(
     fun detach() {
         pendingPos?.let { (id, json) -> settings.savePos(id, json) }
         pendingPos = null
+        pendingEmits.clear()
+        webView.setOnApplyWindowInsetsListener(null)
         Choreographer.getInstance().removeFrameCallback(applyBounds)
         main.removeCallbacksAndMessages(null)
         if (webView.isAttachedToWindow) wm.removeViewImmediate(webView)
@@ -115,7 +135,7 @@ class PetWindow(
             .appendQueryParameter("panels", JSONArray().put(DeskGeometry.rect(geo.panel)).toString())
             .appendQueryParameter("primaryIndex", "0")
             .appendQueryParameter("openTarget", "site")
-            .appendQueryParameter("topMarginRatio", settings.topMarginRatio.coerceIn(0.2f, 0.5f).toString())
+            .appendQueryParameter("sideCrop", if (settings.compact) PetSettings.COMPACT_SIDE_CROP.toString() else "0")
             .build().encodedQuery
         return "${PetRoutes.ORIGIN}/assets/pet-web/index.html?$q"
     }
@@ -146,6 +166,15 @@ class PetWindow(
     fun onCollide(targetId: String, vx: Double, vy: Double) = service.broker.hit(targetId, vx, vy)
 
     fun emit(name: String, payloadJson: String) {
+        if (!pageReady) {
+            if (webView.isAttachedToWindow) pendingEmits[name] = payloadJson
+            return
+        }
+        deliver(name, payloadJson)
+    }
+
+    private fun deliver(name: String, payloadJson: String) {
+        if (!webView.isAttachedToWindow) return
         webView.evaluateJavascript(
             "window.__androidBridge && window.__androidBridge.emit(${JSONObject.quote(name)}, $payloadJson)",
             null,
@@ -153,7 +182,7 @@ class PetWindow(
     }
 
     fun showMenu(items: JSONArray) {
-        if (!webView.isAttachedToWindow) return
+        if (windowHidden || !webView.isAttachedToWindow) return
         val themed = ContextThemeWrapper(service.windowContext, android.R.style.Theme_DeviceDefault_Light)
         val popup = PopupMenu(themed, webView, Gravity.TOP)
         val leaves = mutableListOf<JSONObject>()
@@ -196,12 +225,40 @@ class PetWindow(
     }
 
     fun setPaused(paused: Boolean) {
+        wantPaused = paused
+        applyHold()
+    }
+
+    fun setWindowHidden(hidden: Boolean) {
+        val changed = windowHidden != hidden
+        windowHidden = hidden
+        if (changed) {
+            webView.visibility = if (hidden) View.GONE else View.VISIBLE
+            if (hidden) {
+                lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            }
+            if (webView.isAttachedToWindow) {
+                runCatching { wm.updateViewLayout(webView, lp) }
+            }
+        }
+        applyHold()
+    }
+
+    private fun applyHold() {
+        val hold = wantPaused || windowHidden
         main.removeCallbacks(pauseWeb)
-        if (!paused) {
+        if (!hold) {
+            val wasHolding = holding
+            holding = false
             webView.onResume()
             emit("paused", "false")
+            // 暂停或隐藏期间 WebView 可能没吃进几何更新。恢复后强制再推一次，旋转过的位置才能对上。
+            if (wasHolding && pageReady) service.onPetResumed()
             return
         }
+        holding = true
         emit("paused", "true")
         if (pageReady) main.postDelayed(pauseWeb, 150)
     }

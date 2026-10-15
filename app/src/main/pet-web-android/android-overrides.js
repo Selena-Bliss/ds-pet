@@ -1,9 +1,11 @@
 'use strict';
-// 安卓平台差异：触屏坐标、窗口余量、长按菜单、灭屏暂停、位置持久化。
+// 安卓平台差异：触屏坐标、窗口余量、长按菜单、灭屏暂停、位置持久化、
+// 气泡按需撑高、左右透明边裁剪、折叠/旋转时的密度。
 (() => {
   const native = window.AndroidPet;
   const params = new URLSearchParams(location.search);
-  const TOP_MARGIN_RATIO = Number(params.get('topMarginRatio') || '0.3');
+  // 紧凑窗口：左右各裁掉这么多倍宠物宽。身体从画布 31% 处才开始，0.15 切不到身体。
+  const SIDE_CROP = Math.min(0.15, Math.max(0, Number(params.get('sideCrop') || '0') || 0));
   const LONG_PRESS_MS = 500;
   const LONG_PRESS_SLOP_DP = 8;
   let mediaPaused = false;
@@ -44,11 +46,10 @@
   PetSprite = class AndroidPetSprite extends Base {
     constructor(pet) {
       super(pet);
-      // 只在头顶留气泡空间，左右下不留：安卓窗口内的触摸不会穿透到下层应用
-      const top = this.size * TOP_MARGIN_RATIO;
-      this.margin = { t: top, r: 0, b: 0, l: 0 };
-      this.el.style.left = '0px';
-      this.el.style.top = top + 'px';
+      this.layoutReady = false;
+      this.disposed = false;
+      // 先把桌面那圈 0.5 倍余量收掉。头顶等气泡出现再长，左右只在紧凑窗口时向内裁。
+      this.fitBubbleMargin();
 
       let customPos = null;
       try {
@@ -73,7 +74,15 @@
           native.savePos(this.pet.id, JSON.stringify(v ?? null));
         },
       });
+      this.layoutReady = true;
+      this.fitBubbleMargin();
       this.position();
+
+      this.bubbleObserver = null;
+      if (typeof ResizeObserver === 'function') {
+        this.bubbleObserver = new ResizeObserver(() => this.fitBubbleMargin());
+        this.bubbleObserver.observe(this.bubble);
+      }
 
       this.longPress = null;
       const signal = this.ac.signal;
@@ -84,8 +93,42 @@
     }
 
     dispose() {
+      this.disposed = true;
+      this.bubbleObserver?.disconnect();
+      this.bubbleObserver = null;
       this.cancelLongPress();
       super.dispose();
+    }
+
+    // 没有气泡时头顶余量为 0，窗口贴住宠物，上面的触摸落到下层应用。
+    // 气泡出现后按它实际高出宠物的部分把窗口向上长出来。
+    renderBubble() {
+      super.renderBubble();
+      this.fitBubbleMargin();
+    }
+
+    fitBubbleMargin() {
+      if (this.disposed) return;
+      const side = -SIDE_CROP * this.size;
+      let top = 0;
+      const show = !!(this.bubbleOn || this.whisperOn || this.workOn);
+      if (show && this.bubble) {
+        const bubble = this.bubble.getBoundingClientRect();
+        const host = this.el.getBoundingClientRect();
+        const above = host.top - bubble.top;
+        if (Number.isFinite(above) && above > 0.5) {
+          // 阴影在布局盒外面，补一点避免被窗口切掉；再高也不超过约一只宠物宽。
+          top = Math.min(Math.ceil(above + this.size * 0.04), this.size * 0.85);
+        }
+      }
+      const changed = this.margin.t !== top || this.margin.l !== side || this.margin.r !== side;
+      this.margin.t = top;
+      this.margin.b = 0;
+      this.margin.l = side;
+      this.margin.r = side;
+      this.el.style.left = side + 'px';
+      this.el.style.top = top + 'px';
+      if (changed && this.layoutReady) this.sendBounds(this.pos.x, this.pos.y);
     }
 
     // 触屏长按 500 ms 开菜单：与 src/client/pet.ts 第 1211–1238 行同一判定
@@ -154,6 +197,20 @@
       native.reload();
     }
 
+    // 旋转只改工作区的宽高。上游 relayout 会拿旋转前的绝对坐标去夹新视口：
+    // 竖屏下半部落在横屏外面，夹完就把比例写成贴边，再转回去也回不到原来的位置。
+    relayout() {
+      this.space = null;
+      const keep = this._orientRatio;
+      this._orientRatio = null;
+      if (this.dragState.active || this.throwRef !== null) return;
+      this.stopMove();
+      if (keep && Number.isFinite(keep.rx) && Number.isFinite(keep.ry)) {
+        this.customPos = { rx: keep.rx, ry: keep.ry };
+      }
+      this.position();
+    }
+
     // 手机工作区窄，默认又朝左：只按朝向走时，贴在左边 planMove 会失败，菜单里就变成原地播。
     // 当前方向放不下整段位移时掉头再试一次，朝向和镜像跟着换。
     tryMove(preferredName) {
@@ -169,6 +226,25 @@
 
   window.__androidBridge.on('menuAction', (leaf) => {
     for (const s of sprites) s.onMenuAction(leaf);
+  });
+
+  // 比 renderer.js 的 onDisplays 先注册：这时 VIEW 还是旋转前的。先记下中心点比例，再换密度。
+  // applyDeskGeometry 随后改视口，relayout 用这份比例在新视口里重放。
+  window.__androidBridge.on('displays', (geo) => {
+    const hull = geo && geo.hull;
+    if (!hull || !(hull.width > 0) || !(hull.height > 0)) return;
+    const w = VIEW.w;
+    const h = VIEW.h;
+    if (w > 0 && h > 0 && typeof sprites !== 'undefined') {
+      for (const s of sprites) {
+        if (!s || s.dragState.active || s.throwRef !== null) continue;
+        const rx = (s.pos.x + s.halfW) / w;
+        const ry = (s.pos.y + s.halfH) / h;
+        if (Number.isFinite(rx) && Number.isFinite(ry)) s._orientRatio = { rx, ry };
+      }
+    }
+    const scale = Number(geo.scale);
+    if (Number.isFinite(scale) && scale > 0) CONFIG.scale = scale;
   });
 
   window.__androidBridge.on('paused', (paused) => {

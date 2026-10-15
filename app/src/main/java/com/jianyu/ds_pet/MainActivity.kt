@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -47,7 +48,6 @@ import androidx.core.content.ContextCompat
 import com.jianyu.ds_pet.pet.PetOverlayService
 import com.jianyu.ds_pet.pet.PetSettings
 import com.jianyu.ds_pet.ui.theme.DSpetTheme
-import java.util.Locale
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -60,7 +60,10 @@ class MainActivity : ComponentActivity() {
     private var marginX by mutableFloatStateOf(8f)
     private var marginY by mutableFloatStateOf(48f)
     private var fixed by mutableStateOf(false)
-    private var topMargin by mutableFloatStateOf(0.3f)
+    private var petCount by mutableStateOf(1)
+    private var petCollision by mutableStateOf(false)
+    private var compact by mutableStateOf(false)
+    private var hidden by mutableStateOf(false)
     private var askedNotifications = false
 
     private val requestNotifications = registerForActivityResult(
@@ -83,12 +86,15 @@ class MainActivity : ComponentActivity() {
                     askNotifications = Build.VERSION.SDK_INT >= 33,
                     running = running,
                     paused = paused,
+                    hidden = hidden,
                     sizeDp = sizeDp,
                     corner = corner,
                     marginX = marginX,
                     marginY = marginY,
                     fixed = fixed,
-                    topMargin = topMargin,
+                    petCount = petCount,
+                    petCollision = petCollision,
+                    compact = compact,
                     onRequestOverlay = {
                         startActivity(
                             Intent(
@@ -100,10 +106,10 @@ class MainActivity : ComponentActivity() {
                     onRequestNotifications = { askNotifications() },
                     onStart = { startPet() },
                     onStop = { stopPet() },
+                    onToggleHidden = { toggleHidden() },
                     onSize = { sizeDp = it },
                     onMarginX = { marginX = it },
                     onMarginY = { marginY = it },
-                    onTopMargin = { topMargin = it },
                     onSliderFinished = { persist(reload = true) },
                     onCorner = {
                         corner = it
@@ -111,6 +117,18 @@ class MainActivity : ComponentActivity() {
                     },
                     onFixed = {
                         fixed = it
+                        persist(reload = true)
+                    },
+                    onPetCount = {
+                        petCount = it
+                        persist(reload = true)
+                    },
+                    onPetCollision = {
+                        petCollision = it
+                        persist(reload = true)
+                    },
+                    onCompact = {
+                        compact = it
                         persist(reload = true)
                     },
                     onOpenUpstream = { openUpstream() },
@@ -150,7 +168,9 @@ class MainActivity : ComponentActivity() {
         marginX = saved.marginXDp.coerceIn(0, 200).toFloat()
         marginY = saved.marginYDp.coerceIn(0, 200).toFloat()
         fixed = saved.fixed
-        topMargin = saved.topMarginRatio.coerceIn(0.2f, 0.5f)
+        petCount = saved.petCount.coerceIn(1, 4)
+        petCollision = saved.petCollision
+        compact = saved.compact
     }
 
     private fun refresh() {
@@ -160,6 +180,7 @@ class MainActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         running = PetOverlayService.isRunning
         paused = PetOverlayService.isPaused
+        hidden = PetOverlayService.isHidden
     }
 
     private fun askNotifications() {
@@ -178,8 +199,14 @@ class MainActivity : ComponentActivity() {
     private fun stopPet() {
         running = false
         paused = false
+        hidden = false
         if (!PetOverlayService.isRunning) return
         startService(Intent(this, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_STOP))
+    }
+
+    private fun toggleHidden() {
+        if (!PetOverlayService.isRunning) return
+        startService(Intent(this, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_HIDE))
     }
 
     private fun persist(reload: Boolean) {
@@ -187,26 +214,30 @@ class MainActivity : ComponentActivity() {
         val size = sizeDp.roundToInt().coerceIn(160, 360)
         val x = marginX.roundToInt().coerceIn(0, 200)
         val y = marginY.roundToInt().coerceIn(0, 200)
-        val ratio = ((topMargin.coerceIn(0.2f, 0.5f) / 0.05f).roundToInt() * 0.05f).coerceIn(0.2f, 0.5f)
         val place = corner.takeIf { it in CORNERS } ?: "bottom-right"
+        val count = petCount.coerceIn(1, 4)
         val cornerChanged = saved.corner != place
         val changed = saved.sizeDp != size ||
             cornerChanged ||
             saved.marginXDp != x ||
             saved.marginYDp != y ||
             saved.fixed != fixed ||
-            saved.topMarginRatio != ratio
+            saved.petCount != count ||
+            saved.petCollision != petCollision ||
+            saved.compact != compact
         saved.sizeDp = size
         saved.corner = place
         saved.marginXDp = x
         saved.marginYDp = y
         saved.fixed = fixed
-        saved.topMarginRatio = ratio
+        saved.petCount = count
+        saved.petCollision = petCollision
+        saved.compact = compact
         sizeDp = size.toFloat()
         marginX = x.toFloat()
         marginY = y.toFloat()
-        topMargin = ratio
         corner = place
+        petCount = count
         // 落点优先于角落。改角落时丢掉落点，新角落才会生效；服务没在跑也要清，下次启动用新角落。
         if (cornerChanged) saved.clearPositions()
         if (reload && changed && PetOverlayService.isRunning) {
@@ -235,27 +266,34 @@ private fun SettingsScreen(
     askNotifications: Boolean,
     running: Boolean,
     paused: Boolean,
+    hidden: Boolean,
     sizeDp: Float,
     corner: String,
     marginX: Float,
     marginY: Float,
     fixed: Boolean,
-    topMargin: Float,
+    petCount: Int,
+    petCollision: Boolean,
+    compact: Boolean,
     onRequestOverlay: () -> Unit,
     onRequestNotifications: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onToggleHidden: () -> Unit,
     onSize: (Float) -> Unit,
     onMarginX: (Float) -> Unit,
     onMarginY: (Float) -> Unit,
-    onTopMargin: (Float) -> Unit,
     onSliderFinished: () -> Unit,
     onCorner: (String) -> Unit,
     onFixed: (Boolean) -> Unit,
+    onPetCount: (Int) -> Unit,
+    onPetCollision: (Boolean) -> Unit,
+    onCompact: (Boolean) -> Unit,
     onOpenUpstream: () -> Unit,
 ) {
     val status = when {
         !running -> "未启动"
+        hidden -> "已隐藏"
         paused -> "已暂停"
         else -> "正在屏幕上"
     }
@@ -269,7 +307,7 @@ private fun SettingsScreen(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("桌宠", style = MaterialTheme.typography.headlineMedium)
-            Text("一只透明桌宠，浮在其他应用之上。")
+            Text("透明桌宠，浮在其他应用之上。")
         }
         SectionCard(title = "权限") {
             Text(if (canOverlay) "悬浮窗：已授予" else "悬浮窗：未授予")
@@ -290,9 +328,14 @@ private fun SettingsScreen(
         SectionCard(title = "运行") {
             Text("当前：$status")
             Text("启动后出现在所选角落。轻点有回应，拖动能甩出去，长按约 0.5 秒打开菜单。")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "全屏游戏或视频时，系统看不出对方是不是全屏。通知栏或这里的「隐藏」会先把宠物收起来。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onStart, enabled = canOverlay && !running) { Text("启动") }
                 Button(onClick = onStop, enabled = running) { Text("停止") }
+                Button(onClick = onToggleHidden, enabled = running) { Text(if (hidden) "显示" else "隐藏") }
             }
         }
         SectionCard(title = "宠物") {
@@ -337,15 +380,46 @@ private fun SettingsScreen(
                 }
                 Switch(checked = fixed, onCheckedChange = onFixed)
             }
-            Text("头顶留白 ${String.format(Locale.US, "%.2f", topMargin)}")
-            Slider(
-                value = topMargin,
-                onValueChange = onTopMargin,
-                onValueChangeFinished = onSliderFinished,
-                valueRange = 0.2f..0.5f,
-            )
+            Text("数量 $petCount")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (n in 1..4) {
+                    FilterChip(
+                        selected = petCount == n,
+                        onClick = { onPetCount(n) },
+                        label = { Text("$n") },
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("宠物互撞")
+                    Text(
+                        "打开后，飞起来的那只会把撞到的另一只弹开。关掉就互相穿过。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = petCollision, onCheckedChange = onPetCollision)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("紧凑窗口")
+                    Text(
+                        "左右各裁掉约 15% 的透明边，旁边更好点到下面的应用。风筝、气球这类伸出身体的道具可能被切掉。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = compact, onCheckedChange = onCompact)
+            }
             Text(
-                "留白按宠物宽度计算，给气泡留位置，这块区域也会挡住下层触摸。正在运行时，改宽度、边距和留白会马上重载，并留在拖拽落点。改角落会清掉落点，宠物移到新角落。",
+                "没有气泡时头顶不占地方，可以直接点到下面的应用。气泡出现时，窗口才按气泡高度向上长出来。正在运行时，改宽度、数量、互撞和紧凑窗口会马上重载，并留在拖拽落点。改角落会清掉落点，宠物移到新角落。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -389,23 +463,29 @@ private fun SettingsPreview() {
             askNotifications = true,
             running = false,
             paused = false,
+            hidden = false,
             sizeDp = 240f,
             corner = "bottom-right",
             marginX = 8f,
             marginY = 48f,
             fixed = false,
-            topMargin = 0.3f,
+            petCount = 1,
+            petCollision = false,
+            compact = false,
             onRequestOverlay = {},
             onRequestNotifications = {},
             onStart = {},
             onStop = {},
+            onToggleHidden = {},
             onSize = {},
             onMarginX = {},
             onMarginY = {},
-            onTopMargin = {},
             onSliderFinished = {},
             onCorner = {},
             onFixed = {},
+            onPetCount = {},
+            onPetCollision = {},
+            onCompact = {},
             onOpenUpstream = {},
         )
     }

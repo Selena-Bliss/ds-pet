@@ -13,9 +13,12 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.Display
+import android.view.Surface
 import android.view.WindowManager
 import android.webkit.WebView
 import androidx.core.app.NotificationCompat
@@ -35,12 +38,34 @@ class PetOverlayService : Service() {
         private set
     lateinit var assetLoader: WebViewAssetLoader
         private set
-    val broker = CollisionBroker { windows }
+    val broker = CollisionBroker(
+        petIds = { windows.map { it.petId }.toSet() },
+        collisionEnabled = { settings.petCollision },
+        emitStates = { payload -> windows.forEach { it.emit("flightStates", payload) } },
+        emitHit = { id, payload -> windows.firstOrNull { it.petId == id }?.emit("petHit", payload) },
+    )
 
     private lateinit var wm: WindowManager
     private val windows = mutableListOf<PetWindow>()
+    private val main = Handler(Looper.getMainLooper())
+    private var displayManager: DisplayManager? = null
     private var paused = false
+    private var hidden = false
     private var failed = false
+    private var lastGeo: String? = null
+    private var geoMismatchRetries = 0
+    private lateinit var metricsContext: Context
+
+    private val pushGeoSoon = Runnable { pushGeometryNow() }
+    private val pushGeoLater = Runnable { pushGeometryNow() }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = requestGeometryPush()
+        override fun onDisplayRemoved(displayId: Int) = requestGeometryPush()
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == Display.DEFAULT_DISPLAY) requestGeometryPush()
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = setPaused(i.action == Intent.ACTION_SCREEN_OFF)
@@ -56,6 +81,7 @@ class PetOverlayService : Service() {
         )
         windowContext = createDisplayContext(display)
             .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+        metricsContext = windowContext
         wm = windowContext.getSystemService(WindowManager::class.java)
         settings = PetSettings(this)
         routes = PetRoutes(this, settings, PetStateStore())
@@ -64,6 +90,9 @@ class PetOverlayService : Service() {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
         startInForeground()
+        displayManager = getSystemService(DisplayManager::class.java).also {
+            it.registerDisplayListener(displayListener, main)
+        }
         ContextCompat.registerReceiver(
             this,
             screenReceiver,
@@ -76,6 +105,7 @@ class PetOverlayService : Service() {
         createWindows()
         if (!failed) {
             isRunning = true
+            isHidden = false
             publishState()
         }
     }
@@ -91,6 +121,7 @@ class PetOverlayService : Service() {
             ACTION_RELOAD -> if (windows.isNotEmpty()) {
                 reloadAll(intent?.getBooleanExtra(EXTRA_CLEAR_POS, false) == true)
             }
+            ACTION_HIDE -> setHidden(!hidden)
             else -> if (windows.isEmpty()) createWindows()
         }
         return START_STICKY
@@ -99,11 +130,14 @@ class PetOverlayService : Service() {
     private fun createWindows() {
         try {
             val geo = DeskGeometry.of(windowContext)
+            lastGeo = geo.toJson()
             repeat(settings.petCount.coerceIn(1, 4)) { i ->
                 val id = if (i == 0) "main" else "main$i"
-                windows += PetWindow(this, wm, i, id).also { it.attach(geo) }
+                windows += PetWindow(this, wm, i, id).also {
+                    it.attach(geo, startHidden = hidden)
+                    if (paused) it.setPaused(true)
+                }
             }
-            if (paused) windows.forEach { it.setPaused(true) }
         } catch (e: Exception) {
             Log.e(TAG, "无法添加悬浮窗", e)
             windows.forEach { runCatching { it.detach() } }
@@ -114,6 +148,7 @@ class PetOverlayService : Service() {
     }
 
     fun reloadAll(clearPositions: Boolean = false) {
+        broker.clear()
         windows.forEach { it.detach() }
         // detach 会把还没写盘的落点补上，清位置必须放在这之后。
         if (clearPositions) settings.clearPositions()
@@ -132,13 +167,85 @@ class PetOverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        requestGeometryPush()
+    }
+
+    /** 旋转、折叠、系统栏或挖孔变化。同一帧里的多次回调合成一次，稍后再读一次，躲开指标还没刷新的那一帧。 */
+    fun requestGeometryPush() {
+        main.removeCallbacks(pushGeoSoon)
+        main.removeCallbacks(pushGeoLater)
+        main.post(pushGeoSoon)
+        main.postDelayed(pushGeoLater, 200)
+    }
+
+    /** 亮屏或从隐藏恢复后，丢掉上次的几何缓存，让页面按当前屏幕再摆一次。 */
+    fun onPetResumed() {
+        lastGeo = null
+        requestGeometryPush()
+    }
+
+    private fun pushGeometryNow() {
         if (windows.isEmpty()) return
         try {
-            val geo = DeskGeometry.of(windowContext).toJson()
-            windows.forEach { it.emit("displays", geo) }
+            val geo = deskForCurrentRotation()
+            if (geo == null) {
+                if (geoMismatchRetries++ < 10) {
+                    Log.i(TAG, "屏幕尺寸还没跟上旋转，稍后重试 $geoMismatchRetries")
+                    main.postDelayed(pushGeoLater, 100)
+                }
+                return
+            }
+            geoMismatchRetries = 0
+            val json = geo.toJson()
+            if (json == lastGeo) return
+            lastGeo = json
+            val workW = geo.work.right - geo.work.left
+            val workH = geo.work.bottom - geo.work.top
+            Log.i(TAG, "desk ${workW}x$workH density=${geo.density}")
+            windows.forEach { it.emit("displays", json) }
         } catch (e: Exception) {
             Log.e(TAG, "更新桌面几何失败", e)
         }
+    }
+
+    /**
+     * 长寿的 windowContext 在部分系统上旋转后仍返回旧的宽高。
+     * 和显示器当前方向对不上就换一份新的窗口上下文再读；仍对不上就先不推，避免用错视口。
+     */
+    private fun deskForCurrentRotation(): DeskGeometry? {
+        val orientation = displayOrientation()
+        val cached = DeskGeometry.of(metricsContext)
+        if (boundsMatchOrientation(cached.panel.right - cached.panel.left, cached.panel.bottom - cached.panel.top, orientation)) {
+            return cached
+        }
+        val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY) ?: return null
+        val fresh = createDisplayContext(display)
+            .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+        val next = DeskGeometry.of(fresh)
+        val width = next.panel.right - next.panel.left
+        val height = next.panel.bottom - next.panel.top
+        if (!boundsMatchOrientation(width, height, orientation)) return null
+        // 旧上下文会一直停在旋转前的尺寸。换到这份新的，避免每次系统栏变化都再造一个。
+        metricsContext = fresh
+        return next
+    }
+
+    private fun displayOrientation(): Int {
+        val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+        return when (display?.rotation) {
+            Surface.ROTATION_90, Surface.ROTATION_270 -> Configuration.ORIENTATION_LANDSCAPE
+            Surface.ROTATION_0, Surface.ROTATION_180 -> Configuration.ORIENTATION_PORTRAIT
+            else -> resources.configuration.orientation
+        }
+    }
+
+    private fun setHidden(h: Boolean) {
+        hidden = h
+        isHidden = h
+        windows.forEach { it.setWindowHidden(h) }
+        updateNotification()
+        publishState()
+        Log.i(TAG, if (h) "hidden" else "shown")
     }
 
     private fun startInForeground() {
@@ -169,8 +276,16 @@ class PetOverlayService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val title = if (paused) "桌宠已暂停" else "桌宠正在屏幕上"
-        val text = if (paused) "点「暂停/继续」恢复动画" else "可轻点、拖动，长按打开菜单"
+        val title = when {
+            hidden -> "桌宠已隐藏"
+            paused -> "桌宠已暂停"
+            else -> "桌宠正在屏幕上"
+        }
+        val text = when {
+            hidden -> "全屏游戏或视频时可先藏起来，点「显示」恢复"
+            paused -> "点「暂停/继续」恢复动画"
+            else -> "可轻点、拖动，长按打开菜单"
+        }
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_pet)
             .setContentTitle(title)
@@ -178,6 +293,7 @@ class PetOverlayService : Service() {
             .setContentIntent(content)
             .setOngoing(true)
             .addAction(0, "暂停/继续", pending(ACTION_TOGGLE, 1))
+            .addAction(0, if (hidden) "显示" else "隐藏", pending(ACTION_HIDE, 3))
             .addAction(0, "退出", pending(ACTION_STOP, 2))
             .build()
     }
@@ -189,8 +305,13 @@ class PetOverlayService : Service() {
     override fun onDestroy() {
         isRunning = false
         isPaused = false
+        isHidden = false
         publishState()
+        main.removeCallbacks(pushGeoSoon)
+        main.removeCallbacks(pushGeoLater)
+        displayManager?.let { runCatching { it.unregisterDisplayListener(displayListener) } }
         runCatching { unregisterReceiver(screenReceiver) }
+        broker.clear()
         windows.forEach { runCatching { it.detach() } }
         windows.clear()
         super.onDestroy()
@@ -206,6 +327,7 @@ class PetOverlayService : Service() {
         const val ACTION_STOP = "com.jianyu.ds_pet.STOP"
         const val ACTION_RELOAD = "com.jianyu.ds_pet.RELOAD"
         const val EXTRA_CLEAR_POS = "clearPos"
+        const val ACTION_HIDE = "com.jianyu.ds_pet.HIDE"
         const val ACTION_STATE = "com.jianyu.ds_pet.STATE"
 
         @Volatile
@@ -214,6 +336,10 @@ class PetOverlayService : Service() {
 
         @Volatile
         var isPaused: Boolean = false
+            private set
+
+        @Volatile
+        var isHidden: Boolean = false
             private set
     }
 }

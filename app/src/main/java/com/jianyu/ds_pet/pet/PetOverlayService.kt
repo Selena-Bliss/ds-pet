@@ -88,7 +88,9 @@ class PetOverlayService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_RELOAD -> if (windows.isNotEmpty()) reloadAll()
+            ACTION_RELOAD -> if (windows.isNotEmpty()) {
+                reloadAll(intent?.getBooleanExtra(EXTRA_CLEAR_POS, false) == true)
+            }
             else -> if (windows.isEmpty()) createWindows()
         }
         return START_STICKY
@@ -111,8 +113,10 @@ class PetOverlayService : Service() {
         }
     }
 
-    fun reloadAll() {
+    fun reloadAll(clearPositions: Boolean = false) {
         windows.forEach { it.detach() }
+        // detach 会把还没写盘的落点补上，清位置必须放在这之后。
+        if (clearPositions) settings.clearPositions()
         windows.clear()
         createWindows()
     }
@@ -201,6 +205,7 @@ class PetOverlayService : Service() {
         const val ACTION_TOGGLE = "com.jianyu.ds_pet.TOGGLE"
         const val ACTION_STOP = "com.jianyu.ds_pet.STOP"
         const val ACTION_RELOAD = "com.jianyu.ds_pet.RELOAD"
+        const val EXTRA_CLEAR_POS = "clearPos"
         const val ACTION_STATE = "com.jianyu.ds_pet.STATE"
 
         @Volatile

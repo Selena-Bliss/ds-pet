@@ -153,6 +153,18 @@
     reloadDesktop() {
       native.reload();
     }
+
+    // 手机工作区窄，默认又朝左：只按朝向走时，贴在左边 planMove 会失败，菜单里就变成原地播。
+    // 当前方向放不下整段位移时掉头再试一次，朝向和镜像跟着换。
+    tryMove(preferredName) {
+      const before = this.facing;
+      const moved = super.tryMove(preferredName);
+      if (moved !== false) return moved;
+      this.facing = before === 'left' ? 'right' : 'left';
+      const retry = super.tryMove(preferredName);
+      if (retry === false) this.facing = before;
+      return retry;
+    }
   };
 
   window.__androidBridge.on('menuAction', (leaf) => {

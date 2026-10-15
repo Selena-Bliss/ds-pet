@@ -189,8 +189,9 @@ class MainActivity : ComponentActivity() {
         val y = marginY.roundToInt().coerceIn(0, 200)
         val ratio = ((topMargin.coerceIn(0.2f, 0.5f) / 0.05f).roundToInt() * 0.05f).coerceIn(0.2f, 0.5f)
         val place = corner.takeIf { it in CORNERS } ?: "bottom-right"
+        val cornerChanged = saved.corner != place
         val changed = saved.sizeDp != size ||
-            saved.corner != place ||
+            cornerChanged ||
             saved.marginXDp != x ||
             saved.marginYDp != y ||
             saved.fixed != fixed ||
@@ -206,8 +207,12 @@ class MainActivity : ComponentActivity() {
         marginY = y.toFloat()
         topMargin = ratio
         corner = place
+        // 落点优先于角落。改角落时丢掉落点，新角落才会生效；服务没在跑也要清，下次启动用新角落。
+        if (cornerChanged) saved.clearPositions()
         if (reload && changed && PetOverlayService.isRunning) {
-            startService(Intent(this, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_RELOAD))
+            val intent = Intent(this, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_RELOAD)
+            if (cornerChanged) intent.putExtra(PetOverlayService.EXTRA_CLEAR_POS, true)
+            startService(intent)
         }
     }
 
@@ -340,7 +345,7 @@ private fun SettingsScreen(
                 valueRange = 0.2f..0.5f,
             )
             Text(
-                "留白按宠物宽度计算，给气泡留位置。这块区域在阶段 2 也会挡住下层触摸。桌宠正在运行时，改这些设置会立刻重载。",
+                "留白按宠物宽度计算，给气泡留位置，这块区域也会挡住下层触摸。正在运行时，改宽度、边距和留白会马上重载，并留在拖拽落点。改角落会清掉落点，宠物移到新角落。",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

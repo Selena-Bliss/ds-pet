@@ -32,4 +32,13 @@ class PetSettings(ctx: Context) {
 
     fun loadPos(petId: String): String = sp.getString("pos.$petId", "null")!!
     fun savePos(petId: String, json: String) = sp.edit().putString("pos.$petId", json).apply()
+
+    /** 丢掉拖拽落点，下次按角落和边距摆放。 */
+    fun clearPositions() {
+        val editor = sp.edit()
+        for (key in sp.all.keys) {
+            if (key.startsWith("pos.")) editor.remove(key)
+        }
+        editor.apply()
+    }
 }

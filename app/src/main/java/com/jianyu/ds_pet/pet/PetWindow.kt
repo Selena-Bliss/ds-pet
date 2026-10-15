@@ -208,7 +208,7 @@ class PetWindow(
 
     private val pauseWeb = Runnable { webView.onPause() }
 
-    fun requestReload() = service.reloadAll()
+    fun requestReload() = service.reloadAll(clearPositions = true)
 
     private var pendingPos: Pair<String, String>? = null
 

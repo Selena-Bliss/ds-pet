@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# 同步脚本生成的宠物网页与素材，约 60 MB，不入库
+/app/src/main/assets/pet-web/
+/app/src/main/assets/pet/

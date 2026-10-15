@@ -173,10 +173,19 @@
     openNativeMenu() {
       this.stopThrow();
       this.stopMove();
-      const tools = [
+      const tools = [];
+      // 没填 API Key 时配置里的 balanceEnabled 是 false，这三项都不出现。
+      if (this.pet.balanceEnabled) {
+        tools.push(
+          { label: '查看余额', action: 'show-balance' },
+          { label: '碎碎念', action: 'whisper' },
+          { label: '对话', action: 'chat' },
+        );
+      }
+      tools.push(
         { label: '回到初始位置', action: 'home' },
         { label: '重载配置', action: 'reload' },
-      ];
+      );
       const tree = S.buildMenuTree(this.animations);
       // PopupMenu 只支持一层子菜单：去掉「动作」这一级，分类直接放在根上
       const groups = tree.length ? tree[0].children : [];
@@ -225,6 +234,16 @@
   };
 
   window.__androidBridge.on('menuAction', (leaf) => {
+    // 悬浮窗不获焦，输不了字。对话改开一个能弹出输入法的透明页面。
+    if (leaf && leaf.action === 'chat') {
+      try {
+        const pet = typeof sprites !== 'undefined' && sprites[0] && sprites[0].pet;
+        native.openChat(pet && pet.id ? String(pet.id) : '');
+      } catch (e) {
+        console.error('[android-overrides] chat', e);
+      }
+      return;
+    }
     for (const s of sprites) s.onMenuAction(leaf);
   });
 

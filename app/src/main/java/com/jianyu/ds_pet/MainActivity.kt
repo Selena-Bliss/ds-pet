@@ -27,14 +27,18 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -45,8 +49,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.jianyu.ds_pet.pet.ApiKeyStore
 import com.jianyu.ds_pet.pet.PetOverlayService
 import com.jianyu.ds_pet.pet.PetSettings
+import com.jianyu.ds_pet.pet.calendarGranted
+import com.jianyu.ds_pet.pet.chineseHolidayCalendarCount
 import com.jianyu.ds_pet.ui.theme.DSpetTheme
 import kotlin.math.roundToInt
 
@@ -64,9 +71,20 @@ class MainActivity : ComponentActivity() {
     private var petCollision by mutableStateOf(false)
     private var compact by mutableStateOf(false)
     private var hidden by mutableStateOf(false)
+    private var aiModel by mutableStateOf("")
+    private var keyDraft by mutableStateOf("")
+    private var keySaved by mutableStateOf(false)
+    private var aiError by mutableStateOf<String?>(null)
+    private var canReadCalendar by mutableStateOf(false)
+    private var holidayCalendars by mutableStateOf(0)
+    private var askedCalendar = false
     private var askedNotifications = false
 
     private val requestNotifications = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { refresh() }
+
+    private val requestCalendar = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { refresh() }
 
@@ -131,6 +149,17 @@ class MainActivity : ComponentActivity() {
                         compact = it
                         persist(reload = true)
                     },
+                    aiModel = aiModel,
+                    keyDraft = keyDraft,
+                    keySaved = keySaved,
+                    aiError = aiError,
+                    onAiModel = { aiModel = it },
+                    onKeyDraft = { keyDraft = it },
+                    onSaveAi = { saveAi() },
+                    onClearAi = { clearAi() },
+                    canReadCalendar = canReadCalendar,
+                    holidayCalendars = holidayCalendars,
+                    onRequestCalendar = { askCalendar() },
                     onOpenUpstream = { openUpstream() },
                 )
             }
@@ -171,6 +200,7 @@ class MainActivity : ComponentActivity() {
         petCount = saved.petCount.coerceIn(1, 4)
         petCollision = saved.petCollision
         compact = saved.compact
+        aiModel = saved.aiModel
     }
 
     private fun refresh() {
@@ -181,12 +211,29 @@ class MainActivity : ComponentActivity() {
         running = PetOverlayService.isRunning
         paused = PetOverlayService.isPaused
         hidden = PetOverlayService.isHidden
+        keySaved = ApiKeyStore(this).hasKey()
+        val granted = calendarGranted(this)
+        canReadCalendar = granted
+        holidayCalendars = if (granted) chineseHolidayCalendarCount(this) else 0
     }
 
     private fun askNotifications() {
         if (Build.VERSION.SDK_INT < 33) return
         askedNotifications = true
         requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun askCalendar() {
+        val deniedForGood = askedCalendar &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.READ_CALENDAR)
+        askedCalendar = true
+        if (deniedForGood) {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+            )
+            return
+        }
+        requestCalendar.launch(Manifest.permission.READ_CALENDAR)
     }
 
     private fun startPet() {
@@ -247,6 +294,62 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveAi() {
+        val model = aiModel.trim()
+        if (model.length > 64 || (model.isNotEmpty() && !MODEL_OK.matches(model))) {
+            aiError = "模型名只能包含字母、数字、点、下划线和连字符"
+            return
+        }
+        val draft = keyDraft.trim()
+        if (draft.length > 512) {
+            aiError = "密钥过长"
+            return
+        }
+        val store = ApiKeyStore(this)
+        val hadKey = keySaved
+        var replaced = false
+        if (draft.isNotEmpty()) {
+            try {
+                store.save(draft)
+            } catch (_: Exception) {
+                aiError = "密钥没有保存成功"
+                return
+            }
+            keyDraft = ""
+            replaced = true
+        }
+        PetSettings(this).aiModel = model
+        aiModel = model
+        aiError = null
+        keySaved = store.hasKey()
+        when {
+            hadKey != keySaved -> reloadAi()
+            replaced -> kickBalance()
+        }
+    }
+
+    private fun clearAi() {
+        ApiKeyStore(this).clear()
+        keyDraft = ""
+        keySaved = false
+        aiError = null
+        reloadAi()
+    }
+
+    private fun kickBalance() {
+        if (!PetOverlayService.isRunning) return
+        startService(Intent(this, PetOverlayService::class.java).setAction(PetOverlayService.ACTION_KICK_AI))
+    }
+
+    private fun reloadAi() {
+        if (!PetOverlayService.isRunning) return
+        startService(
+            Intent(this, PetOverlayService::class.java)
+                .setAction(PetOverlayService.ACTION_RELOAD)
+                .putExtra(PetOverlayService.EXTRA_KICK_AI, true),
+        )
+    }
+
     private fun openUpstream() {
         runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UPSTREAM)))
@@ -256,6 +359,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val UPSTREAM = "https://github.com/PC2005-cloud/dsh-pet"
         private val CORNERS = setOf("top-left", "top-right", "bottom-left", "bottom-right")
+        private val MODEL_OK = Regex("[A-Za-z0-9._-]+")
     }
 }
 
@@ -289,6 +393,17 @@ private fun SettingsScreen(
     onPetCount: (Int) -> Unit,
     onPetCollision: (Boolean) -> Unit,
     onCompact: (Boolean) -> Unit,
+    aiModel: String,
+    keyDraft: String,
+    keySaved: Boolean,
+    aiError: String?,
+    onAiModel: (String) -> Unit,
+    onKeyDraft: (String) -> Unit,
+    onSaveAi: () -> Unit,
+    onClearAi: () -> Unit,
+    canReadCalendar: Boolean,
+    holidayCalendars: Int,
+    onRequestCalendar: () -> Unit,
     onOpenUpstream: () -> Unit,
 ) {
     val status = when {
@@ -423,6 +538,52 @@ private fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+        SectionCard(title = "DeepSeek") {
+            Text("填好自己的 API Key 并保存后，长按菜单会出现查看余额、碎碎念和对话。密钥用系统密钥库加密，只存在这台手机上。")
+            Text(if (keySaved) "密钥：已保存" else "密钥：还没有填写")
+            OutlinedTextField(
+                value = keyDraft,
+                onValueChange = onKeyDraft,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("API Key") },
+                placeholder = { Text(if (keySaved) "想更换时再填写" else "sk-…") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            )
+            OutlinedTextField(
+                value = aiModel,
+                onValueChange = onAiModel,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("模型") },
+                placeholder = { Text("deepseek-chat") },
+                singleLine = true,
+                supportingText = { Text("留空时用 deepseek-chat。碎碎念和对话都走这个模型。") },
+            )
+            if (!aiError.isNullOrBlank()) {
+                Text(aiError, color = MaterialTheme.colorScheme.error)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onSaveAi) { Text("保存") }
+                Button(onClick = onClearAi, enabled = keySaved) { Text("清除密钥") }
+            }
+            Text(
+                "亮屏时按配置里的周期查余额、说碎碎念。长按菜单里的查看余额和碎碎念会马上再来一次。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "周末全天是空闲，调休要上班的周末也是。其余日子里，法定节假日全天空闲，平常 9:00–12:00、14:00–18:00 是高峰。假日从手机里的中国节假日日历读取，连休的每一天都算。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                when {
+                    !canReadCalendar -> "节假日日历：还没允许读取"
+                    holidayCalendars == 0 -> "节假日日历：已允许，还没找到中国节假日。可在系统日历里订阅「中国节假日」。"
+                    else -> "节假日日历：已读取 $holidayCalendars 个"
+                },
+            )
+            Button(onClick = onRequestCalendar, enabled = !canReadCalendar) { Text("允许读取日历") }
+        }
         SectionCard(title = "关于") {
             Text("代码来自上游 dsh-pet，采用 MIT 许可。动画、字体和图片允许开源使用，禁止商用。本应用免费，不含广告。")
             TextButton(onClick = onOpenUpstream) { Text("原作者 PC2005-cloud/dsh-pet") }
@@ -486,6 +647,17 @@ private fun SettingsPreview() {
             onPetCount = {},
             onPetCollision = {},
             onCompact = {},
+            aiModel = "",
+            keyDraft = "",
+            keySaved = false,
+            aiError = null,
+            onAiModel = {},
+            onKeyDraft = {},
+            onSaveAi = {},
+            onClearAi = {},
+            canReadCalendar = false,
+            holidayCalendars = 0,
+            onRequestCalendar = {},
             onOpenUpstream = {},
         )
     }

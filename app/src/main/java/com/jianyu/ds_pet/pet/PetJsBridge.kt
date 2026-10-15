@@ -41,6 +41,11 @@ class PetJsBridge(private val window: PetWindow) {
     }
 
     @JavascriptInterface
+    fun openChat(petId: String) {
+        main.post { window.openChat(petId) }
+    }
+
+    @JavascriptInterface
     fun loadPos(petId: String): String = window.settings.loadPos(petId)
 
     @JavascriptInterface

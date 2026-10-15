@@ -34,6 +34,10 @@ class PetSettings(ctx: Context) {
     var compact: Boolean
         get() = sp.getBoolean("compact", false)
         set(v) = sp.edit().putBoolean("compact", v).apply()
+    /** 留空表示用 deepseek-chat。密钥不放在这里。 */
+    var aiModel: String
+        get() = sp.getString("aiModel", "")!!
+        set(v) = sp.edit().putString("aiModel", v.trim()).apply()
 
     companion object {
         /** 不超过身体左侧透明区（画布 200/640）。再大就会切到身体。 */

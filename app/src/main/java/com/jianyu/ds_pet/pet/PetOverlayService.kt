@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.view.Display
 import android.view.Surface
@@ -28,6 +29,10 @@ import androidx.webkit.WebViewAssetLoader
 import com.jianyu.ds_pet.BuildConfig
 import com.jianyu.ds_pet.MainActivity
 import com.jianyu.ds_pet.R
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class PetOverlayService : Service() {
     lateinit var windowContext: Context
@@ -55,6 +60,9 @@ class PetOverlayService : Service() {
     private var lastGeo: String? = null
     private var geoMismatchRetries = 0
     private lateinit var metricsContext: Context
+    private val aiConfig = lazy { loadAiConfig(this) }
+    private var aiExec: ExecutorService? = null
+    private var scheduler: PetAiScheduler? = null
 
     private val pushGeoSoon = Runnable { pushGeometryNow() }
     private val pushGeoLater = Runnable { pushGeometryNow() }
@@ -68,7 +76,11 @@ class PetOverlayService : Service() {
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) = setPaused(i.action == Intent.ACTION_SCREEN_OFF)
+        override fun onReceive(c: Context, i: Intent) {
+            val on = i.action == Intent.ACTION_SCREEN_ON
+            setPaused(!on)
+            scheduler?.setScreenOn(on)
+        }
     }
 
     override fun onCreate() {
@@ -84,7 +96,43 @@ class PetOverlayService : Service() {
         metricsContext = windowContext
         wm = windowContext.getSystemService(WindowManager::class.java)
         settings = PetSettings(this)
-        routes = PetRoutes(this, settings, PetStateStore())
+        val state = PetStateStore()
+        val keys = ApiKeyStore(this)
+        val exec = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "pet-ai").apply { isDaemon = true }
+        }
+        aiExec = exec
+        val holidays = PricingHolidays(this)
+        val engine = PetAi(
+            key = { keys.load() },
+            modelName = { settings.aiModel },
+            config = { aiConfig.value },
+            petName = { id -> petNamed(id, keys.hasKey())?.name },
+            transport = UrlConnectionTransport(),
+            memory = PetMemory(File(filesDir, "memory.json")),
+            sink = StateJsonSink(state),
+            executor = exec,
+            onError = { Log.w(TAG, it) },
+            isHoliday = { holidays.isHoliday(it) },
+        )
+        aiEngine = engine
+        routes = PetRoutes(
+            ctx = this,
+            settings = settings,
+            state = state,
+            aiEnabled = { keys.hasKey() },
+            onBalance = { engine.refreshBalance(manual = true) },
+            onWhisper = { id -> engine.whisperLater(id) },
+        )
+        scheduler = PetAiScheduler(
+            clock = MainClock(main),
+            enabled = { keys.hasKey() },
+            balancePeriodMs = { aiConfig.value.balancePeriodSec.coerceAtLeast(1) * 1000L },
+            whisperPeriodMs = { aiConfig.value.whisperPeriodSec.coerceAtLeast(1) * 1000L },
+            petIds = { petNamedList(keys.hasKey()).filter { it.whisperEnabled }.map { it.id } },
+            refreshBalance = { exec.execute { engine.refreshBalance(manual = false) } },
+            publishWhisper = { id -> exec.execute { engine.whisper(id) } },
+        )
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain("appassets.androidplatform.net")
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -104,6 +152,9 @@ class PetOverlayService : Service() {
         )
         createWindows()
         if (!failed) {
+            val interactive = getSystemService(PowerManager::class.java).isInteractive
+            scheduler?.start(interactive)
+            if (!interactive) setPaused(true)
             isRunning = true
             isHidden = false
             publishState()
@@ -120,7 +171,9 @@ class PetOverlayService : Service() {
             }
             ACTION_RELOAD -> if (windows.isNotEmpty()) {
                 reloadAll(intent?.getBooleanExtra(EXTRA_CLEAR_POS, false) == true)
+                if (intent?.getBooleanExtra(EXTRA_KICK_AI, false) == true) scheduler?.kick()
             }
+            ACTION_KICK_AI -> scheduler?.kickBalance()
             ACTION_HIDE -> setHidden(!hidden)
             else -> if (windows.isEmpty()) createWindows()
         }
@@ -302,7 +355,39 @@ class PetOverlayService : Service() {
         sendBroadcast(Intent(ACTION_STATE).setPackage(packageName))
     }
 
+    fun openChat(petId: String) {
+        if (!::settings.isInitialized) return
+        val id = petId.ifBlank { "main" }
+        val name = petNamed(id, ApiKeyStore(this).hasKey())?.name ?: id
+        val intent = Intent(this, PetChatActivity::class.java)
+            .putExtra(PetChatActivity.EXTRA_PET_ID, id)
+            .putExtra(PetChatActivity.EXTRA_PET_NAME, name)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "无法打开对话", e)
+        }
+    }
+
+    private fun petNamedList(aiEnabled: Boolean): List<ServedPet> = servedPetConfigs(
+        templateName = aiConfig.value.templateName,
+        petCount = settings.petCount,
+        sizeDp = settings.sizeDp,
+        corner = settings.corner,
+        marginXDp = settings.marginXDp,
+        marginYDp = settings.marginYDp,
+        fixed = settings.fixed,
+        aiEnabled = aiEnabled,
+    )
+
+    private fun petNamed(id: String, aiEnabled: Boolean): ServedPet? =
+        petNamedList(aiEnabled).firstOrNull { it.id == id }
+
     override fun onDestroy() {
+        scheduler?.stop()
+        aiExec?.shutdownNow()
+        aiEngine = null
         isRunning = false
         isPaused = false
         isHidden = false
@@ -319,6 +404,16 @@ class PetOverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private class StateJsonSink(private val state: PetStateStore) : AiStateSink {
+        override fun writeSection(name: String, json: String) {
+            state.writeSection(name, JSONObject(json))
+        }
+
+        override fun writePet(petId: String, leaf: String, json: String) {
+            state.writePet(petId, leaf, JSONObject(json))
+        }
+    }
+
     companion object {
         private const val TAG = "dsh-pet"
         private const val CHANNEL = "pet"
@@ -329,6 +424,12 @@ class PetOverlayService : Service() {
         const val EXTRA_CLEAR_POS = "clearPos"
         const val ACTION_HIDE = "com.jianyu.ds_pet.HIDE"
         const val ACTION_STATE = "com.jianyu.ds_pet.STATE"
+        const val EXTRA_KICK_AI = "kickAi"
+        const val ACTION_KICK_AI = "com.jianyu.ds_pet.KICK_AI"
+
+        @Volatile
+        internal var aiEngine: PetAi? = null
+            private set
 
         @Volatile
         var isRunning: Boolean = false

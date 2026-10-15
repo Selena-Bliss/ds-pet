@@ -30,6 +30,7 @@ internal fun servedPetConfigs(
     marginXDp: Int,
     marginYDp: Int,
     fixed: Boolean,
+    aiEnabled: Boolean = false,
 ): List<ServedPet> {
     val count = petCount.coerceIn(1, 4)
     val safeCorner = corner.takeIf { it in PET_CORNERS } ?: "bottom-right"
@@ -47,8 +48,8 @@ internal fun servedPetConfigs(
             corner = safeCorner,
             marginX = marginX + i * size / 3,
             marginY = marginY,
-            balanceEnabled = false,
-            whisperEnabled = false,
+            balanceEnabled = aiEnabled,
+            whisperEnabled = aiEnabled,
             workStatusEnabled = false,
         )
     }
@@ -60,6 +61,9 @@ class PetRoutes(
     private val ctx: Context,
     private val settings: PetSettings,
     val state: PetStateStore,
+    private val aiEnabled: () -> Boolean = { false },
+    private val onBalance: () -> Unit = {},
+    private val onWhisper: (String) -> Unit = {},
 ) {
     fun handle(req: WebResourceRequest): WebResourceResponse? {
         val path = req.url.path ?: return null
@@ -71,8 +75,10 @@ class PetRoutes(
             rest == "state" -> json(state.snapshot())
             rest.startsWith("thumb/") -> thumb(rest.removePrefix("thumb/"), range)
             rest.startsWith("font/") -> safe(rest.removePrefix("font/"))?.let { asset("pet/fonts/$it", "font/ttf", null) } ?: notFound()
-            rest.startsWith("pic/") -> safe(rest.removePrefix("pic/"))?.let { asset("pet/pic/$it", "image/png", null) } ?: notFound()
-            rest in setOf("balance", "whisper", "chat", "reload", "anim", "broadcast") ->
+            rest.startsWith("pic/") -> pic(rest.removePrefix("pic/"))
+            rest == "balance" -> balance(req)
+            rest == "whisper" -> whisper(req)
+            rest in setOf("chat", "reload", "anim", "broadcast") ->
                 json("""{"ok":false,"reason":"unsupported"}""")
             else -> notFound()
         }
@@ -89,6 +95,7 @@ class PetRoutes(
             marginXDp = settings.marginXDp,
             marginYDp = settings.marginYDp,
             fixed = settings.fixed,
+            aiEnabled = aiEnabled(),
         )
         val pets = JSONArray()
         for (pet in served) {
@@ -111,6 +118,25 @@ class PetRoutes(
         base.put("notificationsEnabled", false)
         base.getJSONObject("physics").put("petCollision", settings.petCollision)
         return JSONObject().put("main", base).toString()
+    }
+
+    private fun balance(req: WebResourceRequest): WebResourceResponse {
+        if (!aiEnabled()) return unsupported()
+        if (!req.method.equals("POST", ignoreCase = true)) return methodNotAllowed()
+        onBalance()
+        return json("""{"ok":true}""")
+    }
+
+    private fun whisper(req: WebResourceRequest): WebResourceResponse {
+        if (!aiEnabled()) return unsupported()
+        if (!req.method.equals("POST", ignoreCase = true)) return methodNotAllowed()
+        onWhisper(req.url.getQueryParameter("pet").orEmpty())
+        return json("""{"ok":true}""")
+    }
+
+    private fun pic(afterPic: String): WebResourceResponse {
+        val path = picAssetPath(afterPic) ?: return notFound()
+        return asset(path, "image/png", null)
     }
 
     private fun thumb(rest: String, range: String?): WebResourceResponse {
@@ -157,6 +183,14 @@ class PetRoutes(
 
     private fun json(body: String) = WebResourceResponse(
         "application/json", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"), body.byteInputStream(),
+    )
+
+    private fun unsupported() = json("""{"ok":false,"reason":"unsupported"}""")
+
+    private fun methodNotAllowed() = WebResourceResponse(
+        "application/json", "utf-8", 405, "Method Not Allowed",
+        mapOf("Cache-Control" to "no-store"),
+        """{"error":"method not allowed"}""".byteInputStream(),
     )
 
     private fun notFound() = WebResourceResponse("text/plain", "utf-8", 404, "Not Found", emptyMap(), "".byteInputStream())

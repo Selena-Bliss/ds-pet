@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 用法（在 DS-pet 目录）：node tools/sync-pet-assets.mjs [上游插件目录，默认 ../dsh-pet/dsh-pet]
 import { execSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -94,6 +94,9 @@ rmSync(PET, { recursive: true, force: true });
 cpSync(join(UP, 'assets', 'webm'), join(PET, 'webm'), { recursive: true });
 cpSync(join(UP, 'assets', 'fonts'), join(PET, 'fonts'), { recursive: true });
 cpSync(join(UP, 'assets', 'pic'), join(PET, 'pic'), { recursive: true });
+const memes = join(UP, 'assets', 'memes');
+if (!existsSync(memes)) throw new Error('上游 assets/memes 不存在');
+cpSync(memes, join(PET, 'memes'), { recursive: true });
 const cfg = JSON.parse(stripJsonc(readFileSync(join(UP, 'assets', 'config.jsonc'), 'utf8')));
 writeFileSync(join(PET, 'config.json'), JSON.stringify(cfg, null, 2));
 

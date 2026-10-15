@@ -267,6 +267,8 @@ class PetWindow(
 
     fun requestReload() = service.reloadAll(clearPositions = true)
 
+    fun openChat(petId: String) = service.openChat(petId.ifBlank { this.petId })
+
     private var pendingPos: Pair<String, String>? = null
 
     fun savePosDebounced(petId: String, json: String) {

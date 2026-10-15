@@ -74,6 +74,7 @@ val syncPetAssets = tasks.register<Exec>("syncPetAssets") {
     inputs.dir(upstream.resolve("assets/webm"))
     inputs.dir(upstream.resolve("assets/fonts"))
     inputs.dir(upstream.resolve("assets/pic"))
+    inputs.dir(upstream.resolve("assets/memes"))
     inputs.file(upstream.resolve("scripts/build-desktop-core.mjs"))
     inputs.dir(upstream.resolve("src/shared"))
     inputs.files(

@@ -496,7 +496,7 @@ private fun SettingsScreen(
         }
         SectionCard(title = "运行") {
             Text("当前：$status")
-            Text("启动后出现在所选角落。轻点有回应，拖动能甩出去，长按约 0.5 秒打开菜单。")
+            Text("启动后出现在所选角落。轻点有回应，拖动能甩出去，摇一摇手机也会把它甩飞，长按约 0.5 秒打开菜单。")
             Text(
                 "全屏游戏或视频时，系统看不出对方是不是全屏。通知栏或这里的「隐藏」会先把宠物收起来。",
                 style = MaterialTheme.typography.bodySmall,

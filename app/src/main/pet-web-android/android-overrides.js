@@ -1,6 +1,6 @@
 'use strict';
 // 安卓平台差异：触屏坐标、窗口余量、长按菜单、灭屏暂停、位置持久化、
-// 气泡按需撑高、左右透明边裁剪、折叠/旋转时的密度。
+// 气泡按需撑高、左右透明边裁剪、折叠/旋转时的密度、摇一摇甩飞。
 (() => {
   const native = window.AndroidPet;
   const params = new URLSearchParams(location.search);
@@ -350,6 +350,20 @@
     powerHoldMs = Math.max(0, Number(ms) || 0);
     if (powerHoldMs > 0 || typeof sprites === 'undefined' || !sprites) return;
     for (const s of sprites) s.releasePowerHold?.();
+  });
+
+  // 速度已经是 CSS 像素/秒，直接交给 onDeskHit，不要再除一次 scale。
+  window.__androidBridge.on('shakeFling', (payload) => {
+    if (mediaPaused || typeof sprites === 'undefined' || !sprites) return;
+    const vx = Number(payload && payload.vx);
+    const vy = Number(payload && payload.vy);
+    if (!Number.isFinite(vx) || !Number.isFinite(vy)) return;
+    for (const s of sprites) {
+      if (!s || s.disposed || (s.dragState && s.dragState.active)) continue;
+      s.cancelLongPress?.();
+      s.closeMenu?.();
+      s.onDeskHit(vx, vy);
+    }
   });
 
   window.__androidBridge.on('paused', (paused) => {

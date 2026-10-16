@@ -185,6 +185,10 @@ class PetWindow(
         )
     }
 
+    fun dismissMenu() {
+        actionMenu?.dismiss()
+    }
+
     fun showMenu(items: JSONArray) {
         if (windowHidden || !webView.isAttachedToWindow) return
         val menu = actionMenu ?: PetActionMenu(service.windowContext, wm) { leaf ->

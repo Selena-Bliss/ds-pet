@@ -12,7 +12,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
+import android.os.SystemClock
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -69,6 +74,33 @@ class PetOverlayService : Service() {
 
     private val pushGeoSoon = Runnable { pushGeometryNow() }
     private val pushGeoLater = Runnable { pushGeometryNow() }
+    private var sensorManager: SensorManager? = null
+    private var shakeSensor: Sensor? = null
+    private var shakeIncludesGravity = false
+    private var shakeListening = false
+    private val shakeDetector = ShakeDetector()
+    private val shakeListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val values = event.values
+            if (values.size < 3 || paused || hidden || windows.isEmpty()) return
+            val fling = shakeDetector.sample(
+                ax = values[0],
+                ay = values[1],
+                az = values[2],
+                rotation = currentDisplayRotation(),
+                nowMs = SystemClock.elapsedRealtime(),
+                includesGravity = shakeIncludesGravity,
+            ) ?: return
+            val json = flingJson(fling.vx, fling.vy)
+            Log.i(TAG, "shake-fling $json")
+            windows.forEach {
+                it.dismissMenu()
+                it.emit("shakeFling", json)
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = requestGeometryPush()
@@ -166,12 +198,13 @@ class PetOverlayService : Service() {
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        initShakeSensor()
         createWindows()
         watchBattery()
         if (!failed) {
             val interactive = getSystemService(PowerManager::class.java).isInteractive
             scheduler?.start(interactive)
-            if (!interactive) setPaused(true)
+            if (!interactive) setPaused(true) else updateShakeListening()
             isRunning = true
             isHidden = false
             publishState()
@@ -193,7 +226,10 @@ class PetOverlayService : Service() {
             ACTION_KICK_AI -> scheduler?.kickBalance()
             ACTION_HIDE -> setHidden(!hidden)
             ACTION_POWER -> publishPowerHold(currentBatteryPercent(), force = true)
-            else -> if (windows.isEmpty()) createWindows()
+            else -> if (windows.isEmpty()) {
+                createWindows()
+                updateShakeListening()
+            }
         }
         return START_STICKY
     }
@@ -226,6 +262,7 @@ class PetOverlayService : Service() {
         windows.clear()
         createWindows()
         publishPowerHold(currentBatteryPercent(), force = true)
+        updateShakeListening()
     }
 
     private fun watchBattery() {
@@ -270,12 +307,54 @@ class PetOverlayService : Service() {
         if (changed) Log.i(TAG, if (ms > 0) "power-hold ${ms}ms at $percent%" else "power-hold off")
     }
 
+    private fun initShakeSensor() {
+        val sm = getSystemService(SensorManager::class.java)
+        sensorManager = sm
+        val linear = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        if (linear != null) {
+            shakeSensor = linear
+            shakeIncludesGravity = false
+        } else {
+            shakeSensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            shakeIncludesGravity = true
+        }
+        if (shakeSensor == null) Log.i(TAG, "没有加速度传感器，摇一摇不可用")
+    }
+
+    /** 只有桌宠看得见时才采样。灭屏、暂停、隐藏都停，避免口袋里颠一下就飞。 */
+    private fun updateShakeListening() {
+        val sm = sensorManager
+        val sensor = shakeSensor
+        if (sm == null || sensor == null || paused || hidden || windows.isEmpty() || failed) {
+            if (!shakeListening) return
+            sensorManager?.unregisterListener(shakeListener)
+            shakeListening = false
+            shakeDetector.reset()
+            return
+        }
+        if (shakeListening) return
+        shakeDetector.reset()
+        shakeListening = sm.registerListener(
+            shakeListener,
+            sensor,
+            SensorManager.SENSOR_DELAY_GAME,
+            main,
+        )
+        if (!shakeListening) Log.w(TAG, "加速度传感器没有注册上")
+    }
+
+    private fun currentDisplayRotation(): Int {
+        val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+        return display?.rotation ?: Surface.ROTATION_0
+    }
+
     private fun setPaused(p: Boolean) {
         paused = p
         isPaused = p
         windows.forEach { it.setPaused(p) }
         updateNotification()
         publishState()
+        updateShakeListening()
         Log.i(TAG, if (p) "paused" else "resumed")
     }
 
@@ -359,6 +438,7 @@ class PetOverlayService : Service() {
         windows.forEach { it.setWindowHidden(h) }
         updateNotification()
         publishState()
+        updateShakeListening()
         Log.i(TAG, if (h) "hidden" else "shown")
     }
 
@@ -399,7 +479,7 @@ class PetOverlayService : Service() {
             hidden -> "全屏游戏或视频时可先藏起来，点「显示」恢复"
             paused -> "点「暂停/继续」恢复动画"
             lastHoldMs > 0 -> "电量低于 ${LOW_BATTERY_PERCENT}%，每段动画播完会停 ${LOW_BATTERY_HOLD_MS / 1000} 秒"
-            else -> "可轻点、拖动，长按打开菜单"
+            else -> "可轻点、拖动或摇一摇，长按打开菜单"
         }
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_pet)
@@ -447,6 +527,8 @@ class PetOverlayService : Service() {
         petNamedList(aiEnabled).firstOrNull { it.id == id }
 
     override fun onDestroy() {
+        sensorManager?.unregisterListener(shakeListener)
+        shakeListening = false
         scheduler?.stop()
         aiExec?.shutdownNow()
         aiEngine = null

@@ -1,0 +1,32 @@
+DS-pet 安卓移植附带的上游作品说明
+来源：https://github.com/PC2005-cloud/dsh-pet
+
+代码：MIT。下面的版权声明和许可原文必须随应用保留。
+素材（动画、提示词、源视频）：允许开源使用，禁止商用。
+本应用免费、无广告、不向用户收费。要上架收费或加入广告，必须先取得原作者书面授权。
+应用介绍、关于页和任何分发页面都要附上原作者地址：
+https://github.com/PC2005-cloud/dsh-pet
+
+--------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 PC2005-cloud
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

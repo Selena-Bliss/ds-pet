@@ -9,6 +9,8 @@
   const LONG_PRESS_MS = 500;
   const LONG_PRESS_SLOP_DP = 8;
   let mediaPaused = false;
+  // 低电量时由 Kotlin 下发的静止毫秒数。0 表示按原速度接上下一段。
+  let powerHoldMs = 0;
 
   const style = document.createElement('style');
   style.textContent =
@@ -93,11 +95,75 @@
     }
 
     dispose() {
+      this.cancelPowerHold();
       this.disposed = true;
       this.bubbleObserver?.disconnect();
       this.bubbleObserver = null;
       this.cancelLongPress();
       super.dispose();
+    }
+
+    // 电量低于 20% 时，这段播完先停在最后一帧，再进下一段。拖拽、甩抛、走路途中不插这段空白。
+    handleEnded() {
+      if (this.disposed) return;
+      if (this.dragState.active || this.throwRef !== null || this.moveRef !== null || powerHoldMs <= 0) {
+        super.handleEnded();
+        return;
+      }
+      this.armPowerHold();
+    }
+
+    playOnce(name) {
+      this.cancelPowerHold();
+      super.playOnce(name);
+    }
+
+    switchTo(next, nextOnce) {
+      this.cancelPowerHold();
+      super.switchTo(next, nextOnce);
+    }
+
+    armPowerHold() {
+      this.cancelPowerHold();
+      const wait = powerHoldMs;
+      if (wait <= 0) {
+        super.handleEnded();
+        return;
+      }
+      this.powerHoldTimer = setTimeout(() => {
+        this.powerHoldTimer = null;
+        if (this.disposed) return;
+        if (mediaPaused || this.dragState.active || this.throwRef !== null) {
+          this.powerHoldPending = true;
+          return;
+        }
+        super.handleEnded();
+      }, wait);
+    }
+
+    cancelPowerHold() {
+      if (this.powerHoldTimer) clearTimeout(this.powerHoldTimer);
+      this.powerHoldTimer = null;
+      this.powerHoldPending = false;
+    }
+
+    freezePowerHold() {
+      if (!this.powerHoldTimer) return;
+      clearTimeout(this.powerHoldTimer);
+      this.powerHoldTimer = null;
+      this.powerHoldPending = true;
+    }
+
+    releasePowerHold() {
+      if (this.powerHoldTimer) {
+        clearTimeout(this.powerHoldTimer);
+        this.powerHoldTimer = null;
+        this.powerHoldPending = true;
+      }
+      if (!this.powerHoldPending || this.disposed) return;
+      if (mediaPaused || this.dragState.active || this.throwRef !== null) return;
+      this.powerHoldPending = false;
+      super.handleEnded();
     }
 
     // 没有气泡时头顶余量为 0，窗口贴住宠物，上面的触摸落到下层应用。
@@ -266,12 +332,25 @@
     if (Number.isFinite(scale) && scale > 0) CONFIG.scale = scale;
   });
 
+  window.__androidBridge.on('powerHold', (ms) => {
+    powerHoldMs = Math.max(0, Number(ms) || 0);
+    if (powerHoldMs > 0 || typeof sprites === 'undefined' || !sprites) return;
+    for (const s of sprites) s.releasePowerHold?.();
+  });
+
   window.__androidBridge.on('paused', (paused) => {
     mediaPaused = !!paused;
+    if (typeof sprites === 'undefined' || !sprites) return;
     for (const s of sprites) {
-      for (const v of [s.videoA, s.videoB]) {
-        if (mediaPaused) v.pause();
-        else if (v.classList.contains('is-front')) v.play().catch(() => {});
+      if (mediaPaused) {
+        s.freezePowerHold?.();
+        for (const v of [s.videoA, s.videoB]) v.pause();
+      } else if (s.powerHoldPending) {
+        s.releasePowerHold?.();
+      } else {
+        for (const v of [s.videoA, s.videoB]) {
+          if (v.classList.contains('is-front')) v.play().catch(() => {});
+        }
       }
     }
   });

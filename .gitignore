@@ -14,6 +14,11 @@
 .cxx
 local.properties
 
+# 发布签名。密钥库和口令只留在本机，丢失后无法用同一把钥匙更新已安装的包。
+/keystore.properties
+/keystore/*.jks
+/keystore/*.keystore
+
 # 同步脚本生成的宠物网页与素材，约 60 MB，不入库
 /app/src/main/assets/pet-web/
 /app/src/main/assets/pet/

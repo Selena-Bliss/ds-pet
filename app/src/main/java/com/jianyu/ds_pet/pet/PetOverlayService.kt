@@ -5,10 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
@@ -57,6 +58,8 @@ class PetOverlayService : Service() {
     private var paused = false
     private var hidden = false
     private var failed = false
+    private var lastHoldMs = -1
+    private var batteryRegistered = false
     private var lastGeo: String? = null
     private var geoMismatchRetries = 0
     private lateinit var metricsContext: Context
@@ -80,6 +83,19 @@ class PetOverlayService : Service() {
             val on = i.action == Intent.ACTION_SCREEN_ON
             setPaused(!on)
             scheduler?.setScreenOn(on)
+            if (on) publishPowerHold(currentBatteryPercent())
+        }
+    }
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (i.action != Intent.ACTION_BATTERY_CHANGED) return
+            publishPowerHold(
+                batteryPercent(
+                    i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1),
+                    i.getIntExtra(BatteryManager.EXTRA_SCALE, -1),
+                ),
+            )
         }
     }
 
@@ -151,6 +167,7 @@ class PetOverlayService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         createWindows()
+        watchBattery()
         if (!failed) {
             val interactive = getSystemService(PowerManager::class.java).isInteractive
             scheduler?.start(interactive)
@@ -175,6 +192,7 @@ class PetOverlayService : Service() {
             }
             ACTION_KICK_AI -> scheduler?.kickBalance()
             ACTION_HIDE -> setHidden(!hidden)
+            ACTION_POWER -> publishPowerHold(currentBatteryPercent(), force = true)
             else -> if (windows.isEmpty()) createWindows()
         }
         return START_STICKY
@@ -207,6 +225,49 @@ class PetOverlayService : Service() {
         if (clearPositions) settings.clearPositions()
         windows.clear()
         createWindows()
+        publishPowerHold(currentBatteryPercent(), force = true)
+    }
+
+    private fun watchBattery() {
+        if (batteryRegistered) return
+        try {
+            val sticky = ContextCompat.registerReceiver(
+                this,
+                batteryReceiver,
+                IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            batteryRegistered = true
+            val percent = if (sticky != null) {
+                batteryPercent(
+                    sticky.getIntExtra(BatteryManager.EXTRA_LEVEL, -1),
+                    sticky.getIntExtra(BatteryManager.EXTRA_SCALE, -1),
+                )
+            } else {
+                currentBatteryPercent()
+            }
+            publishPowerHold(percent, force = true)
+        } catch (e: Exception) {
+            Log.w(TAG, "电池广播没有注册上", e)
+            publishPowerHold(currentBatteryPercent(), force = true)
+        }
+    }
+
+    private fun currentBatteryPercent(): Int {
+        val pct = getSystemService(BatteryManager::class.java)
+            .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        return if (pct in 0..100) pct else -1
+    }
+
+    private fun publishPowerHold(percent: Int, force: Boolean = false) {
+        if (!::settings.isInitialized) return
+        val ms = powerHoldMs(settings.lowBatteryHold, percent)
+        val changed = ms != lastHoldMs
+        if (!force && !changed) return
+        lastHoldMs = ms
+        windows.forEach { it.emit("powerHold", ms.toString()) }
+        if (changed) updateNotification()
+        if (changed) Log.i(TAG, if (ms > 0) "power-hold ${ms}ms at $percent%" else "power-hold off")
     }
 
     private fun setPaused(p: Boolean) {
@@ -337,6 +398,7 @@ class PetOverlayService : Service() {
         val text = when {
             hidden -> "全屏游戏或视频时可先藏起来，点「显示」恢复"
             paused -> "点「暂停/继续」恢复动画"
+            lastHoldMs > 0 -> "电量低于 ${LOW_BATTERY_PERCENT}%，每段动画播完会停 ${LOW_BATTERY_HOLD_MS / 1000} 秒"
             else -> "可轻点、拖动，长按打开菜单"
         }
         return NotificationCompat.Builder(this, CHANNEL)
@@ -395,6 +457,8 @@ class PetOverlayService : Service() {
         main.removeCallbacks(pushGeoSoon)
         main.removeCallbacks(pushGeoLater)
         displayManager?.let { runCatching { it.unregisterDisplayListener(displayListener) } }
+        if (batteryRegistered) runCatching { unregisterReceiver(batteryReceiver) }
+        batteryRegistered = false
         runCatching { unregisterReceiver(screenReceiver) }
         broker.clear()
         windows.forEach { runCatching { it.detach() } }
@@ -426,6 +490,7 @@ class PetOverlayService : Service() {
         const val ACTION_STATE = "com.jianyu.ds_pet.STATE"
         const val EXTRA_KICK_AI = "kickAi"
         const val ACTION_KICK_AI = "com.jianyu.ds_pet.KICK_AI"
+        const val ACTION_POWER = "com.jianyu.ds_pet.POWER"
 
         @Volatile
         internal var aiEngine: PetAi? = null

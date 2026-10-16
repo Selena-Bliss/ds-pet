@@ -1,6 +1,7 @@
 package com.jianyu.ds_pet
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -50,8 +52,11 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.jianyu.ds_pet.pet.ApiKeyStore
+import com.jianyu.ds_pet.pet.LOW_BATTERY_HOLD_MS
+import com.jianyu.ds_pet.pet.LOW_BATTERY_PERCENT
 import com.jianyu.ds_pet.pet.PetOverlayService
 import com.jianyu.ds_pet.pet.PetSettings
+import com.jianyu.ds_pet.pet.keepAliveGuide
 import com.jianyu.ds_pet.pet.calendarGranted
 import com.jianyu.ds_pet.pet.chineseHolidayCalendarCount
 import com.jianyu.ds_pet.ui.theme.DSpetTheme
@@ -71,6 +76,8 @@ class MainActivity : ComponentActivity() {
     private var petCollision by mutableStateOf(false)
     private var compact by mutableStateOf(false)
     private var hidden by mutableStateOf(false)
+    private var lowBatteryHold by mutableStateOf(true)
+    private var batteryUnrestricted by mutableStateOf(false)
     private var aiModel by mutableStateOf("")
     private var keyDraft by mutableStateOf("")
     private var keySaved by mutableStateOf(false)
@@ -149,6 +156,23 @@ class MainActivity : ComponentActivity() {
                         compact = it
                         persist(reload = true)
                     },
+                    lowBatteryHold = lowBatteryHold,
+                    batteryUnrestricted = batteryUnrestricted,
+                    keepAliveVendor = keepAlive.vendor,
+                    keepAliveActions = keepAlive.actions,
+                    keepAlivePath = keepAlive.settingsPath,
+                    onLowBatteryHold = {
+                        lowBatteryHold = it
+                        PetSettings(this).lowBatteryHold = it
+                        if (PetOverlayService.isRunning) {
+                            startService(
+                                Intent(this, PetOverlayService::class.java)
+                                    .setAction(PetOverlayService.ACTION_POWER),
+                            )
+                        }
+                    },
+                    onOpenBatterySettings = { openBatteryOptimizationList() },
+                    onOpenAppSettings = { openAppDetails() },
                     aiModel = aiModel,
                     keyDraft = keyDraft,
                     keySaved = keySaved,
@@ -200,6 +224,7 @@ class MainActivity : ComponentActivity() {
         petCount = saved.petCount.coerceIn(1, 4)
         petCollision = saved.petCollision
         compact = saved.compact
+        lowBatteryHold = saved.lowBatteryHold
         aiModel = saved.aiModel
     }
 
@@ -215,6 +240,8 @@ class MainActivity : ComponentActivity() {
         val granted = calendarGranted(this)
         canReadCalendar = granted
         holidayCalendars = if (granted) chineseHolidayCalendarCount(this) else 0
+        batteryUnrestricted = getSystemService(PowerManager::class.java)
+            .isIgnoringBatteryOptimizations(packageName)
     }
 
     private fun askNotifications() {
@@ -350,6 +377,24 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun openBatteryOptimizationList() {
+        try {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        } catch (_: ActivityNotFoundException) {
+            openAppDetails()
+        }
+    }
+
+    private fun openAppDetails() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+            )
+        } catch (_: ActivityNotFoundException) {
+            // 系统设置页打不开时，保活说明仍留在本页上。
+        }
+    }
+
     private fun openUpstream() {
         runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UPSTREAM)))
@@ -360,6 +405,7 @@ class MainActivity : ComponentActivity() {
         private const val UPSTREAM = "https://github.com/PC2005-cloud/dsh-pet"
         private val CORNERS = setOf("top-left", "top-right", "bottom-left", "bottom-right")
         private val MODEL_OK = Regex("[A-Za-z0-9._-]+")
+        private val keepAlive = keepAliveGuide(Build.MANUFACTURER, Build.BRAND)
     }
 }
 
@@ -393,6 +439,14 @@ private fun SettingsScreen(
     onPetCount: (Int) -> Unit,
     onPetCollision: (Boolean) -> Unit,
     onCompact: (Boolean) -> Unit,
+    lowBatteryHold: Boolean,
+    batteryUnrestricted: Boolean,
+    keepAliveVendor: String,
+    keepAliveActions: String,
+    keepAlivePath: String,
+    onLowBatteryHold: (Boolean) -> Unit,
+    onOpenBatterySettings: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     aiModel: String,
     keyDraft: String,
     keySaved: Boolean,
@@ -451,6 +505,35 @@ private fun SettingsScreen(
                 Button(onClick = onStart, enabled = canOverlay && !running) { Text("启动") }
                 Button(onClick = onStop, enabled = running) { Text("停止") }
                 Button(onClick = onToggleHidden, enabled = running) { Text(if (hidden) "显示" else "隐藏") }
+            }
+        }
+        SectionCard(title = "保活") {
+            Text("灭屏后动画会停，亮屏再继续。前台服务之外，有些系统仍会在后台把桌宠清掉，需要你按本机说明手动放开。")
+            Text(keepAliveVendor, style = MaterialTheme.typography.titleMedium)
+            Text(keepAliveActions)
+            Text(keepAlivePath)
+            Text(
+                "通用入口是电池优化列表，请自己找到 DS-pet 并选「不优化」。应用不会直接申请忽略电池优化。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(if (batteryUnrestricted) "当前：已不受电池优化限制" else "当前：仍受电池优化限制")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onOpenBatterySettings) { Text("打开电池优化列表") }
+                Button(onClick = onOpenAppSettings) { Text("打开应用信息") }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("低电量放慢")
+                    Text(
+                        "电量低于 $LOW_BATTERY_PERCENT% 时，每段动画播完静止 ${LOW_BATTERY_HOLD_MS / 1000} 秒再继续。拖拽、甩抛和走路途中不会卡住。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = lowBatteryHold, onCheckedChange = onLowBatteryHold)
             }
         }
         SectionCard(title = "宠物") {
@@ -585,7 +668,9 @@ private fun SettingsScreen(
             Button(onClick = onRequestCalendar, enabled = !canReadCalendar) { Text("允许读取日历") }
         }
         SectionCard(title = "关于") {
-            Text("代码来自上游 dsh-pet，采用 MIT 许可。动画、字体和图片允许开源使用，禁止商用。本应用免费，不含广告。")
+            Text("DS-pet 是 dsh-pet 的安卓移植。本应用免费、无广告、不收费。")
+            Text("代码采用 MIT 许可，版权归原作者 PC2005-cloud（2026）。动画、提示词和源视频允许开源使用，禁止商用。要收费或加广告，必须先取得原作者书面授权。")
+            Text("只有保存了 DeepSeek API Key 之后才会联网，请求只发往 api.deepseek.com。密钥用系统密钥库加密，只存在这台手机上。日历权限只在本机读取中国节假日，不会上传。应用不收集账号，也没有统计 SDK。")
             TextButton(onClick = onOpenUpstream) { Text("原作者 PC2005-cloud/dsh-pet") }
         }
     }
@@ -647,6 +732,14 @@ private fun SettingsPreview() {
             onPetCount = {},
             onPetCollision = {},
             onCompact = {},
+            lowBatteryHold = true,
+            batteryUnrestricted = false,
+            keepAliveVendor = "当前系统",
+            keepAliveActions = "在电池优化里把 DS-pet 选为不优化。",
+            keepAlivePath = "系统设置 → 电池 → 电池优化",
+            onLowBatteryHold = {},
+            onOpenBatterySettings = {},
+            onOpenAppSettings = {},
             aiModel = "",
             keyDraft = "",
             keySaved = false,

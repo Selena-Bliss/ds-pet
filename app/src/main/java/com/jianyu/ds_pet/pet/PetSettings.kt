@@ -34,6 +34,13 @@ class PetSettings(ctx: Context) {
     var compact: Boolean
         get() = sp.getBoolean("compact", false)
         set(v) = sp.edit().putBoolean("compact", v).apply()
+    /**
+     * 电量低于 20% 时，每段动画播完静止一会儿再继续。
+     * 拖拽、甩抛和走路过程中不插入这段静止。
+     */
+    var lowBatteryHold: Boolean
+        get() = sp.getBoolean("lowBatteryHold", true)
+        set(v) = sp.edit().putBoolean("lowBatteryHold", v).apply()
     /** 留空表示用 deepseek-chat。密钥不放在这里。 */
     var aiModel: String
         get() = sp.getString("aiModel", "")!!

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 用法（在 DS-pet 目录）：node tools/sync-pet-assets.mjs [上游插件目录，默认 ../dsh-pet/dsh-pet]
-import { execSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execSync, spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -76,6 +76,8 @@ const required = [
   [sprite, 'this.margin'], [sprite, 'this.hit'], [sprite, 'this.videoA'],
   [sprite, 'renderBubble()'], [sprite, 'relayout()'], [sprite, 'sendBounds(px, py)'],
   [sprite, 'this.bubbleOn'], [sprite, 'this.whisperOn'], [sprite, 'this.workOn'],
+  [sprite, 'handleEnded()'], [sprite, 'playOnce(name)'], [sprite, 'switchTo(next, nextOnce)'],
+  [sprite, 'this.throwRef'], [sprite, 'this.moveRef'],
   [constants, 'let sprites'], [constants, 'function toScreen'], [constants, 'function applyDeskGeometry'],
 ];
 for (const [text, id] of required) {
@@ -92,6 +94,8 @@ writeFileSync(spritePath, sprite.replace(marker, 'var PetSprite = class PetSprit
 // 4. 素材与配置
 rmSync(PET, { recursive: true, force: true });
 cpSync(join(UP, 'assets', 'webm'), join(PET, 'webm'), { recursive: true });
+// 阶段 1 的 CPU 没有超标记录时不要降分辨率。需要时：PET_WEBM_MAX_WIDTH=480 node tools/sync-pet-assets.mjs
+if (process.env.PET_WEBM_MAX_WIDTH === '480') downscaleWebm(join(PET, 'webm'));
 cpSync(join(UP, 'assets', 'fonts'), join(PET, 'fonts'), { recursive: true });
 cpSync(join(UP, 'assets', 'pic'), join(PET, 'pic'), { recursive: true });
 const memes = join(UP, 'assets', 'memes');
@@ -101,3 +105,29 @@ const cfg = JSON.parse(stripJsonc(readFileSync(join(UP, 'assets', 'config.jsonc'
 writeFileSync(join(PET, 'config.json'), JSON.stringify(cfg, null, 2));
 
 console.log('[sync-pet-assets] 完成：', WEB, PET);
+
+function downscaleWebm(dir) {
+  const probe = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+  if (probe.error || probe.status !== 0) {
+    throw new Error('PET_WEBM_MAX_WIDTH=480 需要带 libvpx 的 ffmpeg，当前找不到 ffmpeg');
+  }
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.webm')) continue;
+    const src = join(dir, name);
+    const tmp = join(dir, `.${name}.480.webm`);
+    const run = spawnSync(
+      'ffmpeg',
+      [
+        '-y', '-c:v', 'libvpx-vp9', '-i', src,
+        '-vf', 'scale=480:270',
+        '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '34', '-row-mt', '1', '-an',
+        tmp,
+      ],
+      { stdio: 'inherit' },
+    );
+    if (run.status !== 0) throw new Error('降分辨率失败：' + name);
+    rmSync(src);
+    renameSync(tmp, src);
+  }
+  console.log('[sync-pet-assets] 已把 webm 降到 480×270');
+}

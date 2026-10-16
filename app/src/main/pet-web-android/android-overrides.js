@@ -13,8 +13,16 @@
   let powerHoldMs = 0;
 
   const style = document.createElement('style');
-  style.textContent =
-    '.pet-hit{touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}';
+  style.textContent = [
+    '.pet-hit{touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}',
+    // 快速换动画时，还没出帧或刚被 pause 的 video 会盖上系统播放键（灰底椭圆三角）。
+    'video.pet-video{background:transparent!important}',
+    'video.pet-video::-webkit-media-controls,video.pet-video::-webkit-media-controls-enclosure,',
+    'video.pet-video::-webkit-media-controls-panel,video.pet-video::-webkit-media-controls-play-button,',
+    'video.pet-video::-webkit-media-controls-start-playback-button,',
+    'video.pet-video::-webkit-media-controls-overlay-play-button,',
+    'video.pet-video::-webkit-media-controls-overlay-enclosure{display:none!important;-webkit-appearance:none;opacity:0!important;pointer-events:none!important}',
+  ].join('');
   document.head.appendChild(style);
 
   // 灭屏时 WebView 可能先收到暂停、后才创建视频。拦住 play()，避免亮屏前又把解码拉起来。
@@ -48,6 +56,12 @@
   PetSprite = class AndroidPetSprite extends Base {
     constructor(pet) {
       super(pet);
+      for (const v of [this.videoA, this.videoB]) {
+        v.controls = false;
+        v.disablePictureInPicture = true;
+        v.setAttribute('playsinline', '');
+        v.setAttribute('webkit-playsinline', '');
+      }
       this.layoutReady = false;
       this.disposed = false;
       // 先把桌面那圈 0.5 倍余量收掉。头顶等气泡出现再长，左右只在紧凑窗口时向内裁。

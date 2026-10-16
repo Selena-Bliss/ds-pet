@@ -6,9 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Choreographer
-import android.view.ContextThemeWrapper
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.view.Gravity
-import android.view.Menu
 import android.view.View
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
@@ -18,7 +18,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.PopupMenu
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -94,6 +93,9 @@ class PetWindow(
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
+            // 没出帧时 WebView 会盖上系统自带的灰底播放键。换成全透明，快速换动画时不再闪那张模板。
+            override fun getDefaultVideoPoster(): Bitmap = defaultVideoPoster()
+
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                 val msg = "${consoleMessage.message()} (${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
                 when (consoleMessage.messageLevel()) {
@@ -110,6 +112,8 @@ class PetWindow(
     }
 
     fun detach() {
+        actionMenu?.dismiss()
+        actionMenu = null
         pendingPos?.let { (id, json) -> settings.savePos(id, json) }
         pendingPos = null
         pendingEmits.clear()
@@ -183,45 +187,10 @@ class PetWindow(
 
     fun showMenu(items: JSONArray) {
         if (windowHidden || !webView.isAttachedToWindow) return
-        val themed = ContextThemeWrapper(service.windowContext, android.R.style.Theme_DeviceDefault_Light)
-        val popup = PopupMenu(themed, webView, Gravity.TOP)
-        val leaves = mutableListOf<JSONObject>()
-        for (i in 0 until items.length()) {
-            val node = items.getJSONObject(i)
-            val children = node.optJSONArray("children")
-            if (children == null || children.length() == 0) {
-                popup.menu.add(0, leaves.size + 1, i, node.getString("label"))
-                leaves += node
-            } else {
-                val sub = popup.menu.addSubMenu(0, Menu.NONE, i, node.getString("label"))
-                for (j in 0 until children.length()) {
-                    val leaf = children.getJSONObject(j)
-                    sub.add(0, leaves.size + 1, j, leaf.getString("label"))
-                    leaves += leaf
-                }
-            }
-        }
-        popup.setOnMenuItemClickListener { item ->
-            leaves.getOrNull(item.itemId - 1)?.let { emit("menuAction", it.toString()) }
-            true
-        }
-        popup.setOnDismissListener { restoreNotFocusable() }
-        // 悬浮窗默认不获焦，PopupMenu 在部分系统上收不到点击。菜单期间暂时允许获焦。
-        lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-        try {
-            wm.updateViewLayout(webView, lp)
-            popup.show()
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "菜单无法显示", e)
-            restoreNotFocusable()
-        }
-    }
-
-    private fun restoreNotFocusable() {
-        lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        if (webView.isAttachedToWindow) {
-            runCatching { wm.updateViewLayout(webView, lp) }
-        }
+        val menu = actionMenu ?: PetActionMenu(service.windowContext, wm) { leaf ->
+            emit("menuAction", leaf.toString())
+        }.also { actionMenu = it }
+        menu.show(MenuRect(lp.x, lp.y, lp.x + lp.width, lp.y + lp.height), items)
     }
 
     fun setPaused(paused: Boolean) {
@@ -230,6 +199,7 @@ class PetWindow(
     }
 
     fun setWindowHidden(hidden: Boolean) {
+        if (hidden) actionMenu?.dismiss()
         val changed = windowHidden != hidden
         windowHidden = hidden
         if (changed) {
@@ -269,6 +239,7 @@ class PetWindow(
 
     fun openChat(petId: String) = service.openChat(petId.ifBlank { this.petId })
 
+    private var actionMenu: PetActionMenu? = null
     private var pendingPos: Pair<String, String>? = null
 
     fun savePosDebounced(petId: String, json: String) {
@@ -286,5 +257,16 @@ class PetWindow(
 
     companion object {
         private const val TAG = "dsh-pet"
+        private var poster: Bitmap? = null
+
+        @Synchronized
+        internal fun defaultVideoPoster(): Bitmap {
+            val existing = poster
+            if (existing != null && !existing.isRecycled) return existing
+            return Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).also {
+                it.eraseColor(Color.TRANSPARENT)
+                poster = it
+            }
+        }
     }
 }
